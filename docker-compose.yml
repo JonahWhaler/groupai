@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+    groupai:
+        container_name: groupai_dev
+        build: ./groupai
+        restart: always
+        command: python3 src/main.py
+        env_file:
+            - ./config.env
+        volumes:
+            - "./storage/data:/file:rw"
+            - "./storage/logs:/logs:rw"
+        deploy:
+            resources:
+                limits:
+                    cpus: "8"
+                    memory: 8192M
