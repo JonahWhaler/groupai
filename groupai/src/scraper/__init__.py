@@ -69,8 +69,8 @@ if __name__ == "__main__":
     OPENAI_API_KEY = ""
     vision_model = "gpt-4o-mini-2024-07-18"
     audio_model = "whisper-1"
-    file_path = "/mnt/second/projects/groupai/groupai/src/scraper/Sermon Isaac 1013.m4a"
-    mime_type = "audio/m4a"
-    caption = "Sunday Service at City Light Penang on 10/13/2022"
+    file_path = ""
+    mime_type = ""
+    caption = ""
     asyncio.run(test(OPENAI_API_KEY, vision_model,
                 audio_model, file_path, mime_type, caption))
