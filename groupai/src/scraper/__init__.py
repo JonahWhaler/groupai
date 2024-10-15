@@ -1,5 +1,3 @@
-# __all__ = ["audio_scraper", "docx_scraper", "pdf_scraper"]
-
 import os
 import io
 from typing import Optional
@@ -34,20 +32,14 @@ async def media_to_transcript(
     scraper = get_scraper(mime_type, tmp_directory=tmp_directory, **kwargs)
     assert scraper is not None
 
-    ext = mime_type.split('/')[1]
-    tmp_file = None
     md_content = f'<error>\nUnsupported File Type\n</error>'
     buffer = None
 
-    # tmp_path = f"{tmp_directory}/{filename_wo_ext}.{ext}"
-    # await input_file.download_to_drive(tmp_path)
     md_content = scraper(
         input_path=input_file, buffer=buffer,
         identifier=filename_wo_ext, caption=caption, output_path="/mnt/second/projects/groupai/groupai/src/scraper/output.md"
     )
-
-    # if tmp_file:
-    #     os.remove(tmp_file)
+    
     return md_content
 
 
