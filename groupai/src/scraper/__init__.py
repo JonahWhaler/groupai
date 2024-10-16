@@ -5,6 +5,7 @@ from audio_scraper import AudioToMarkdownScraper
 from docx_scraper import DocxToMarkdownScraper
 from pdf_scraper import PDFToMarkdownScraper
 from image_scraper import ImageToMarkdownScraper
+from base_scraper import BaseScraper
 
 
 def get_scraper(mime_type: str, **kwargs):
