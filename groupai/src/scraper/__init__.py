@@ -23,7 +23,7 @@ def get_scraper(mime_type: str, **kwargs):
     return None
 
 
-async def media_to_transcript(
+def media_to_transcript(
     input_file: str, filename_wo_ext: str, caption: str, mime_type: str,
     tmp_directory: Optional[str] = None,
     **kwargs
@@ -43,9 +43,9 @@ async def media_to_transcript(
     return md_content
 
 
-async def test(OPENAI_API_KEY, vision_model, audio_model, file_path, mime_type, caption):
+def test(OPENAI_API_KEY, vision_model, audio_model, file_path, mime_type, caption):
     filename_wo_ext: str = os.path.basename(file_path).split(".")[0]
-    md = await media_to_transcript(
+    md = media_to_transcript(
         input_file=file_path, filename_wo_ext=filename_wo_ext,
         caption=caption, mime_type=mime_type,
         OPENAI_API_KEY=OPENAI_API_KEY,
