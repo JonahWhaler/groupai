@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 from typing import Any, Callable, Coroutine, Tuple, Optional
-import myfunction
+import handlers
 
 logging.basicConfig(
     filename="/logs/groupai.log",
@@ -32,12 +32,12 @@ def run_bot(bot: Application) -> None:
             allowed_list.append(int(value))
     
     allowed_list = filters.User(user_id=allowed_list)
-    bot.add_handler(MessageHandler(filters.ALL & allowed_list, myfunction.middleware_function), group=0)
-    bot.add_handler(CommandHandler("export", myfunction.export_handler, filters=allowed_list), group=1)
-    bot.add_handler(CommandHandler("help", myfunction.help_handler, filters=allowed_list), group=1)
-    bot.add_handler(CommandHandler("ask", myfunction.ask_handler, filters=allowed_list), group=1)
-    bot.add_handler(MessageHandler(filters.TEXT & allowed_list, myfunction.message_handler), group=1)
-    bot.add_error_handler(myfunction.error_handler)
+    bot.add_handler(MessageHandler(filters.ALL & allowed_list, handlers.middleware_function), group=0)
+    # bot.add_handler(CommandHandler("export", handlers.export_handler, filters=allowed_list), group=1)
+    bot.add_handler(CommandHandler("help", handlers.help_handler, filters=allowed_list), group=1)
+    bot.add_handler(CommandHandler("ask", handlers.ask_handler, filters=allowed_list), group=1)
+    bot.add_handler(MessageHandler(filters.TEXT & allowed_list, handlers.message_handler), group=1)
+    bot.add_error_handler(handlers.error_handler)
     bot.run_polling(poll_interval=0)
 
 

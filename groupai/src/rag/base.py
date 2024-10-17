@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict
 import openai
 import logging
@@ -11,33 +12,28 @@ RESPONSE_WINDOW = 2048
 TEMPERATURE = 0.7
 
 BASE_PROMPT = """
-You are an AI assistant living in Telegram Group chat. 
-
-Role:
-- Summarize the discussion
-- Recall incidents
-- Provide unbias opinions relevant to the conversation
-- Identify task items
-
-User Group:
-Expect the user to use both English and Mandarin interchangeably.
+You are an AI assistant living in Telegram Group chat. You are carefully crafted to handle user requests.
 
 Note:
 Feel free to process the user requests in step by step order. 
 """
 
+# like below:
+# - Summarize the discussion
+# - Recall incidents
+# - Provide unbias opinions relevant to the conversation
+# - Identify task items
 
 class BaseRAG:
-    def __init__(self, vector_collection, openai_api_key: str, embedding_model: str = "text-embedding-3-small", gpt_model: str = "gpt-4o-mini", top_n: int = 20):
+    def __init__(self, vector_collection, embedding_model: str = "text-embedding-3-small", gpt_model: str = "gpt-4o-mini", top_n: int = 20):
         self.vc = vector_collection
-        self.openai_api_key = openai_api_key
         self.embedding_model = embedding_model
         self.gpt_model = gpt_model
-        self.tokenizer = tiktoken.get_encoding(self.gpt_model)
+        self.top_n = top_n
 
     def _text_to_embedding(self, text: str):
         try:
-            client = openai.OpenAI(api_key=self.openai_api_key)
+            client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
             response = client.embeddings.create(
                 input=text, model=self.embedding_model)
             return response.data[0].embedding
@@ -45,8 +41,12 @@ class BaseRAG:
             logger.error(f"text_to_embedding: {e}")
             raise
 
-    def _count_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text))
+    def _count_tokens(self, text: str, is_embedding: bool = True) -> int:
+        if is_embedding:
+            tokenizer = tiktoken.encoding_for_model(self.embedding_model)
+        else:
+            tokenizer = tiktoken.encoding_for_model(self.gpt_model)
+        return len(tokenizer.encode(text))
 
     def _truncate(self, context: str, max_context_tokens: int) -> str:
         """
@@ -54,11 +54,15 @@ class BaseRAG:
 
         Give up older context if necessary.
         """
+        lines = reversed(context.split("\n\n"))
+        token_count = self._count_tokens(context, is_embedding=False)
+        if token_count <= max_context_tokens:
+            return "\n\n".join(lines)
+        
         truncated_context = []
         total_token_count = 0
-
-        for line in context.split("\n\n"):
-            token_count = self._count_tokens(line)
+        for line in lines:
+            token_count = self._count_tokens(line, is_embedding=False)
             if total_token_count + token_count <= max_context_tokens:
                 truncated_context.append(line)
                 total_token_count += token_count
@@ -86,7 +90,7 @@ class BaseRAG:
         return query_prompt, context_prompt
 
     def generate(self, query, context, **kwargs):
-        client = openai.OpenAI(api_key=self.openai_api_key)
+        client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
         response = client.chat.completions.create(
             model=self.gpt_model,
             messages=[

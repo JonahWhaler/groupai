@@ -9,20 +9,23 @@ from telegram.constants import ParseMode
 from typing import Optional, List
 import openai
 import chromadb
-import tiktoken
-from copy import deepcopy
+# import tiktoken
+# from copy import deepcopy
 
 from storage import SQLite3_Storage
 from model import CompactMessage, Media
-import myfunction
+# import myfunction
 from rag.base import BaseRAG
 from knowledge_handler import KnowledgeHandler
+from tlg_msg_scrapper import TlgMsgScraper
 
 logger = logging.getLogger(__name__)
 master = os.getenv("MASTER_TLG_ID", 0)
 assert master != 0
 
 GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")
+AUDIO_MODEL = os.getenv("AUDIO_MODEL", "whisper-1")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Note!!!
@@ -32,13 +35,30 @@ CONTEXT_BUFFER = 1000
 CHUNK_SIZE = 4096
 MAX_CHUNK_SIZE = 8100
 
-openai.api_key = os.getenv("OPENAI_TOKEN")
+openai.api_key = os.environ["OPENAI_API_KEY"]
 vdb_client = chromadb.Client(
     settings=chromadb.Settings(
         is_persistent=True,
         persist_directory="/file",
     )
 )
+
+
+def get_metadata(message: CompactMessage) -> dict:
+    metadata = dict()
+    metadata["created"] = message.created
+    metadata["username"] = message.username
+    metadata["isAnswer"] = message.isAnswer
+    metadata["isForwarded"] = message.isForwarded
+    if message.isForwarded:
+        metadata["author"] = message.author
+        metadata["isBot"] = message.isBot
+    metadata["edited"] = message.edited
+    metadata["deleted"] = message.deleted
+    metadata["isMedia"] = message.media.isMedia
+    if message.media.isMedia:
+        metadata["mime_type"] = message.media.mime_type
+    return metadata
 
 
 async def middleware_function(update: Update, context: CallbackContext) -> None:
@@ -59,46 +79,6 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
     Raises:
         No exceptions are explicitly raised, but errors are logged.
 
-    Flow:
-        1. Log the incoming update.
-        2. Extract the message or edited message from the update.
-        3. Parse the message into a CompactMessage format using myfunction.parse_message().
-           This includes handling forwarded messages and extracting media information.
-        4. If media is present:
-           - Extract media details using extract_media() function.
-           - Transcribe or describe the media content using media_to_transcript() function.
-        5. Store the CompactMessage in an SQLite database, keyed by chat ID.
-        6. Generate a text embedding for the message content using OpenAI's API.
-        7. Store the embedding, along with metadata, in a vector database collection named after the chat ID.
-
-    Media Handling:
-        - Supports documents, photos, videos, audio files, and voice messages.
-        - Media information is extracted into a Media object with properties:
-          isMedia, fileid, filename, mime_type, and transcript.
-        - Only the content of parseable media is stored, not the file itself:
-          * Audio: Transcribed using OpenAI's Whisper model.
-          * Images: Described using GPT-4 Vision model.
-          * PDFs: Converted to markdown.
-          * DOCX files: Converted to markdown.
-        - The file_id is stored, allowing retrieval from Telegram's servers when needed.
-        - Transcripts are prefixed with emojis indicating the media type (e.g., 🎤 for audio, 🖼 for images).
-        - Temporary files may be created during processing but are deleted afterwards.
-
-    File Storage:
-        - The original files are NOT stored locally.
-        - Only the file_id and processed content (transcriptions, descriptions) are stored.
-        - This approach saves storage space while maintaining the ability to access original files via Telegram's API.
-
-    Notes:
-        - Uses myfunction.parse_message() to convert Telegram Message to CompactMessage.
-        - Handles both new and edited messages.
-        - Special handling for forwarded messages, including original sender information.
-        - Media processing includes transcription/description using various models and techniques.
-        - SQLite database filename is based on the chat ID.
-        - Vector database collection name is the chat ID, prefixed with 'g' for group chats.
-        - Logs errors if the message body is not found.
-        - Assumes the existence of a configured logger and vdb_client.
-
     """
     logger.info(f"\nMiddleware Function => Update: {update}")
     # Extract the message or edited message from the update
@@ -110,34 +90,57 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
         logger.error(
             f"\nException: [Message Body Not Found]=> Update: {update}")
         return None
-
-    knowledge_handler = KnowledgeHandler(
-        openai_api_key=openai.api_key, embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
+    
+    if edited_message:
+        context.user_data["edited_message"] = True
+        namespace = f'g{edited_message.chat.id}' if edited_message.chat.id < 0 else str(edited_message.chat.id)
+    else:
+        namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
+    
+    tmp_directory = f'/file/{namespace}'
+    tlg_msg_scraper = TlgMsgScraper(
+        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
         gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW,
-        vision_model="gpt-4o-mini", audio_model="whisper-1",
+        vision_model=VISION_MODEL, audio_model=AUDIO_MODEL, tmp_directory=tmp_directory
     )
     if edited_message:
-        processed_message = await knowledge_handler.process_tlg_message(edited_message, True, context)
+        processed_message = await tlg_msg_scraper.preprocessing(edited_message, True)
     else:
-        processed_message = await knowledge_handler.process_tlg_message(message, False, context)
-    # processed_message is a complete CompactMessage object, media content is not chunked
-    
-    # Store the CompactMessage in an SQLite database
-    storage = SQLite3_Storage(f"/file/{processed_message.chatid}.db", overwrite=False)
-    storage.set(processed_message.identifier, processed_message.to_dict())
-    
-    # Embedding model has size limitation, so we need to split the document into chunks
+        processed_message = await tlg_msg_scraper.preprocessing(message, False)
+
     if processed_message.media.isMedia:
-        documents = knowledge_handler.split_media_to_documents(processed_message, processed_message.media.markdown)
+        media_file = await context.bot.get_file(processed_message.media.fileid)
+        # Issue: More than one user upload file with the same filename
+        tmp_path = f'{tlg_msg_scraper.tmp_directory}/{processed_message.media.filename}'
+        await media_file.download_to_drive(tmp_path)
+        processed_message.media.markdown = tlg_msg_scraper.to_markdown(
+            processed_message)
+        os.remove(tmp_path)
+        context.user_data['media_markdown'] = processed_message.media.markdown
+
+    # Store the CompactMessage in an SQLite database
+    storage = SQLite3_Storage(f"/file/{namespace}.db", overwrite=False)
+    if processed_message.edited:
+        old_message = storage.get(processed_message.identifier)
+        if old_message:
+            processed_message.created = old_message['created']
+    storage.set(processed_message.identifier, processed_message.to_dict())
+
+    knowledge_handler = KnowledgeHandler(
+        tmp_directory=tmp_directory,
+        vdb=vdb_client,
+        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
+        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
+    )
+    metadata = get_metadata(processed_message)
+    logger.info(f"Metadat: {metadata}")
+    logger.info(f"Information: {str(processed_message)}")
+    if "edited_message" in context.user_data:
+        knowledge_handler.update(namespace=namespace, identifier=processed_message.identifier,
+                          knowledge=str(processed_message), metadata=metadata)
     else:
-        documents = [processed_message]
-    
-    # Identify the vector database collection
-    chatid = f'g{processed_message.chatid}' if processed_message.chatid< 0 else str(processed_message.chatid)
-    vector_collection = vdb_client.get_or_create_collection(name=chatid,)
-    # Store the embedding, along with metadata, in a vector database collection
-    ids, metadatas, chunks, embeddings = knowledge_handler.prepare_documents_for_rag_indexing(documents)
-    vector_collection.add(documents=chunks, embeddings=embeddings, metadatas=metadatas, ids=ids)
+        knowledge_handler.add(namespace=namespace, identifier=processed_message.identifier,
+                          knowledge=str(processed_message), metadata=metadata)
 
 
 async def error_handler(update: object, context: CallbackContext):
@@ -151,61 +154,74 @@ async def help_handler(update: Update, context: CallbackContext) -> None:
 
 
 async def message_handler(update: Update, context: CallbackContext) -> None:
-    await update.message.reply_text("=== COPY ===")
-    # pass
+    if "edited_message" in context.user_data:
+        message = getattr(update, "edited_message", None)
+    else:
+        message = getattr(update, "message", None)
+    await message.reply_text("=== COPY ===")
+
+
+def escape_markdown_v2(text):
+    """
+    Escape special characters for Telegram's MarkdownV2.
+    """
+    # Characters that need to be escaped
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    
+    # Escape backslash first to avoid double escaping
+    text = text.replace('\\', '\\\\')
+    
+    # Escape special characters
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    
+    return f"```{text}```"
 
 
 async def ask_handler(update: Update, context: CallbackContext) -> None:
-    await update.message.reply_text("=== PROCESSING... ===")
-    chatid = update.message.chat.id
-    if chatid < 0:
-        chatid = f'g{chatid}'
+    if "edited_message" in context.user_data:
+        message = getattr(update, "edited_message", None)
     else:
-        chatid = str(chatid)
-    
-    # Identify the vector database collection
-    vector_collection = vdb_client.get_or_create_collection(name=chatid)
+        message = getattr(update, "message", None)
+        
+    await message.reply_text("=== PROCESSING... ===")
+    namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
+    tmp_directory = f'/file/{namespace}'
+    vector_collection = vdb_client.get_or_create_collection(name=namespace)
     # Instantiate the RAG model
     rag = BaseRAG(
-        vector_collection=vector_collection, openai_api_key=openai.api_key,
-        embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=20
+        vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
     )
     # Generate the response
-    query_text = update.message.text
+    query_text = message.text
+    if "media_markdown" in context.user_data:
+        query_text += f"\n\n{context.user_data['media_markdown']}"
+
     answer = rag(query_text)
+    answer = escape_markdown_v2(answer)
     # Send the response
-    reply_msg = await update.message.reply_text(answer, parse_mode=ParseMode.MARKDOWN)
-    # Store the response in an SQLite database
-    conversation = CompactMessage(
-        identifier=f"{reply_msg.chat.id}/{reply_msg.message_id}",
-        text=None,
-        chattype=reply_msg.chat.type,
-        chatid=reply_msg.chat.id,
-        chatname=reply_msg.chat.title or f"{reply_msg.chat.first_name} {reply_msg.chat.last_name}",
-        userid=reply_msg.from_user.id,
-        username=reply_msg.from_user.username,
-        message_id=reply_msg.message_id,
-        created=str(reply_msg.date),
-        lastUpdated=str(reply_msg.date),
-        edited=False,
-        deleted=False,
-        isForwarded=False,
-        author=None,
-        isBot=False,
-        isAnswer=True,
-        media=Media(False, None, None, None, None)
-    )
-    storage = SQLite3_Storage(
-        f"/file/{conversation.chatid}.db", overwrite=False)
-    storage.set(conversation.identifier, conversation.to_dict())
-    # Generate a text embedding for the message content
-    knowledge_handler = KnowledgeHandler(
-        openai_api_key=openai.api_key, embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
+    logger.info(f"Answer: {answer}")
+    reply_msg = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
+    tlg_msg_scraper = TlgMsgScraper(
+        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
         gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW,
-        vision_model="gpt-4o-mini", audio_model="whisper-1",
+        vision_model=VISION_MODEL, audio_model=AUDIO_MODEL, tmp_directory=tmp_directory
     )
-    ids, metadatas, chunks, embeddings = knowledge_handler.prepare_documents_for_rag_indexing([conversation])
-    vector_collection.add(documents=chunks, embeddings=embeddings, metadatas=metadatas, ids=ids)
+    processed_message = await tlg_msg_scraper.preprocessing(reply_msg, False)
+    processed_message.isAnswer = True
+    # Store the response in an SQLite database
+    storage = SQLite3_Storage(f"/file/{namespace}.db", overwrite=False)
+    storage.set(processed_message.identifier, processed_message.to_dict())
+    # Store the knowledge in the knowledge base
+    knowledge_handler = KnowledgeHandler(
+        tmp_directory=tmp_directory,
+        vdb=vdb_client,
+        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
+        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
+    )
+    metadata = get_metadata(processed_message)
+    knowledge_handler.add(namespace=namespace, identifier=processed_message.identifier,
+                          knowledge=str(processed_message), metadata=metadata)
 
 
 # async def export_handler(update: Update, context: CallbackContext) -> None:
