@@ -5,12 +5,11 @@ import math
 from pydub import AudioSegment
 import openai
 import ffmpeg
-from base_scraper import BaseScraper
+from .base_scraper import BaseScraper
 
 
 class AudioToMarkdownScraper(BaseScraper):
     def __init__(self, **kwargs):
-        openai.api_key = kwargs.get('OPENAI_API_KEY')
         self.model = kwargs.get("audio_model", "whisper-1")
         self.mime_type = kwargs.get("mime_type", None)
         assert self.mime_type is not None
@@ -98,7 +97,8 @@ class AudioToMarkdownScraper(BaseScraper):
             file=buffer, model=self.model, response_format='text',
             prompt=f"{context}"
         )
-        cc_response = openai.chat.completions.create(
+        client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        cc_response = client.chat.completions.create(
             model=self.gpt_model,
             messages=[
                 {"role": "system", "content": "You will be given a piece of transcript together with the summary of the previous part. You will summarize it."},

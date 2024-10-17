@@ -1,11 +1,11 @@
 import os
 import io
 from typing import Optional
-from audio_scraper import AudioToMarkdownScraper
-from docx_scraper import DocxToMarkdownScraper
-from pdf_scraper import PDFToMarkdownScraper
-from image_scraper import ImageToMarkdownScraper
-from base_scraper import BaseScraper
+from .audio_scraper import AudioToMarkdownScraper
+from .docx_scraper import DocxToMarkdownScraper
+from .pdf_scraper import PDFToMarkdownScraper
+from .image_scraper import ImageToMarkdownScraper
+# from .base_scraper import BaseScraper
 
 
 def get_scraper(mime_type: str, **kwargs):
@@ -49,7 +49,6 @@ def test(OPENAI_API_KEY, vision_model, audio_model, file_path, mime_type, captio
     md = media_to_transcript(
         input_file=file_path, filename_wo_ext=filename_wo_ext,
         caption=caption, mime_type=mime_type,
-        OPENAI_API_KEY=OPENAI_API_KEY,
         vision_model=vision_model, audio_model=audio_model,
         tmp_directory=tmp_directory
     )

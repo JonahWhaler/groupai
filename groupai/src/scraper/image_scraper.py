@@ -2,14 +2,13 @@ from typing import Optional
 import base64
 import os
 import openai
-from base_scraper import BaseScraper
+from .base_scraper import BaseScraper
 import io
 
 
 class ImageToMarkdownScraper(BaseScraper):
     # TODO: Ensure the image does not exceed the size limit
     def __init__(self, **kwargs):
-        openai.api_key = kwargs.get('OPENAI_API_KEY')
         self.model = kwargs.get("vision_model", "gpt-4o-mini")
 
     def to_markdown(self, image_path: str, caption: str):
@@ -45,7 +44,8 @@ class ImageToMarkdownScraper(BaseScraper):
             messages[1]['content'].append({"type": "text", "text": caption})
 
         # Call the OpenAI API
-        response = openai.chat.completions.create(
+        client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        response = client.chat.completions.create(
             model=self.model,
             messages=messages,
             max_tokens=300

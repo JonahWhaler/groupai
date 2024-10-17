@@ -4,8 +4,8 @@ import os
 import re
 from io import StringIO, BytesIO
 from typing import Optional, List
-from base_scraper import BaseScraper
-from image_scraper import ImageToMarkdownScraper
+from .base_scraper import BaseScraper
+from .image_scraper import ImageToMarkdownScraper
 
 
 class DocxToMarkdownScraper(BaseScraper):

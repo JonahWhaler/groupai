@@ -4,8 +4,8 @@ import openai
 import os
 import io
 from typing import Optional, List, Dict
-from base_scraper import BaseScraper
-from image_scraper import ImageToMarkdownScraper
+from .base_scraper import BaseScraper
+from .image_scraper import ImageToMarkdownScraper
 # import pandas as pd
 # import warnings
 # # Suppress pandas' FutureWarning
