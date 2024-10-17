@@ -38,20 +38,20 @@ def media_to_transcript(
 
     md_content = scraper(
         input_path=input_file, buffer=buffer,
-        identifier=filename_wo_ext, caption=caption, output_path="/mnt/second/projects/groupai/groupai/src/scraper/output.md"
+        identifier=filename_wo_ext, caption=caption, output_path=f"{tmp_directory}/{filename_wo_ext}.md"
     )
     
     return md_content
 
 
-def test(OPENAI_API_KEY, vision_model, audio_model, file_path, mime_type, caption):
+def test(OPENAI_API_KEY, vision_model, audio_model, file_path, mime_type, caption, tmp_directory):
     filename_wo_ext: str = os.path.basename(file_path).split(".")[0]
     md = media_to_transcript(
         input_file=file_path, filename_wo_ext=filename_wo_ext,
         caption=caption, mime_type=mime_type,
         OPENAI_API_KEY=OPENAI_API_KEY,
         vision_model=vision_model, audio_model=audio_model,
-        tmp_directory="/mnt/second/projects/groupai/groupai/src/scraper"
+        tmp_directory=tmp_directory
     )
     print(md)
 
@@ -65,5 +65,6 @@ if __name__ == "__main__":
     file_path = ""
     mime_type = ""
     caption = ""
+    tmp_directory = ""
     asyncio.run(test(OPENAI_API_KEY, vision_model,
-                audio_model, file_path, mime_type, caption))
+                audio_model, file_path, mime_type, caption, tmp_directory))
