@@ -195,7 +195,8 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
         vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
     )
     # Generate the response
-    query_text = message.text
+    query_text = message.text.strip()
+    query_text = query_text.replace("/ask ", "")
     if "media_markdown" in context.user_data:
         query_text += f"\n\n{context.user_data['media_markdown']}"
 
@@ -225,6 +226,61 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
     knowledge_handler.add(namespace=namespace, identifier=processed_message.identifier,
                           knowledge=str(processed_message), metadata=metadata)
 
+
+async def summary_handler(update: Update, context: CallbackContext) -> None:
+    if "edited_message" in context.user_data:
+        message = getattr(update, "edited_message", None)
+    else:
+        message = getattr(update, "message", None)
+    await message.reply_text("=== PROCESSING... ===")
+    namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
+    tmp_directory = f'/file/{namespace}'
+    vector_collection = vdb_client.get_or_create_collection(
+        name=namespace, metadata={
+            "hnsw:space": "cosine"
+        }
+    )
+    # Instantiate the RAG model
+    rag = BaseRAG(
+        vector_collection=vector_collection, 
+        embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, 
+        top_n=20, initial_instruction=os.environ["SUMMARY_PROMPT"]
+    )
+    query_text: str = message.text.strip()
+    query_text = query_text.replace("/summary ", "")
+    
+    if query_text != "":
+        query_text = f"Topic/Keyword: {query_text}"
+    else:
+        query_text = "Topic/Keyword: General Summary"
+    
+    if "media_markdown" in context.user_data:
+        query_text += f"\n\nMedia: {context.user_data['media_markdown']}"
+    
+    answer = rag(query_text)
+    answer = escape_markdown_v2(answer)
+    reply_msg = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
+    tlg_msg_scraper = TlgMsgScraper(
+        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
+        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW,
+        vision_model=VISION_MODEL, audio_model=AUDIO_MODEL, tmp_directory=tmp_directory
+    )
+    processed_message = await tlg_msg_scraper.preprocessing(reply_msg, False)
+    processed_message.isAnswer = True
+    # Store the response in an SQLite database
+    storage = SQLite3_Storage(f"/file/{namespace}.db", overwrite=False)
+    storage.set(processed_message.identifier, processed_message.to_dict())
+    # Store the knowledge in the knowledge base
+    knowledge_handler = KnowledgeHandler(
+        tmp_directory=tmp_directory,
+        vdb=vdb_client,
+        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
+        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
+    )
+    metadata = get_metadata(processed_message)
+    knowledge_handler.add(namespace=namespace, identifier=processed_message.identifier,
+                          knowledge=str(processed_message), metadata=metadata)
+    
 
 # async def export_handler(update: Update, context: CallbackContext) -> None:
 #     """
