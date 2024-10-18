@@ -164,3 +164,4 @@ cython_debug/
 asset/
 storage/
 config.env
+tests/
