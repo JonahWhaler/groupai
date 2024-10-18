@@ -11,12 +11,7 @@ CONTEXT_BUFFER = 1000
 RESPONSE_WINDOW = 2048
 TEMPERATURE = 0.7
 
-BASE_PROMPT = """
-You are an AI assistant living in Telegram Group chat. You are carefully crafted to handle user requests.
-
-Note:
-Feel free to process the user requests in step by step order. 
-"""
+BASE_PROMPT = os.environ["RAG_PROMPT"]
 
 # like below:
 # - Summarize the discussion
@@ -106,8 +101,7 @@ class BaseRAG:
 
     def __call__(self, query: str, **kwargs):
         context = self.retrieve(query)
-        context = self._truncate(
-            context, CONTEXT_WINDOW - self._count_tokens(query) - CONTEXT_BUFFER)
+        context = self._truncate(context, CONTEXT_WINDOW - self._count_tokens(query) - CONTEXT_BUFFER)
         query_prompt, context_prompt = self.augment(query, context)
         response = self.generate(query_prompt, context_prompt)
         return response
