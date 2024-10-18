@@ -13,18 +13,17 @@ TEMPERATURE = 0.7
 
 BASE_PROMPT = os.environ["RAG_PROMPT"]
 
-# like below:
-# - Summarize the discussion
-# - Recall incidents
-# - Provide unbias opinions relevant to the conversation
-# - Identify task items
 
 class BaseRAG:
-    def __init__(self, vector_collection, embedding_model: str = "text-embedding-3-small", gpt_model: str = "gpt-4o-mini", top_n: int = 20):
+    def __init__(self, vector_collection, embedding_model: str = "text-embedding-3-small", gpt_model: str = "gpt-4o-mini", top_n: int = 20, initial_instruction: str = ""):
         self.vc = vector_collection
         self.embedding_model = embedding_model
         self.gpt_model = gpt_model
         self.top_n = top_n
+        if initial_instruction == "" or initial_instruction is None:
+            self.initial_instruction = BASE_PROMPT
+        else:
+            self.initial_instruction = initial_instruction
 
     def _text_to_embedding(self, text: str):
         try:
@@ -89,7 +88,7 @@ class BaseRAG:
         response = client.chat.completions.create(
             model=self.gpt_model,
             messages=[
-                {"role": "system", "content": BASE_PROMPT},
+                {"role": "system", "content": self.initial_instruction},
                 {"role": "system", "content": context},
                 {"role": "user", "content": query}
             ],
