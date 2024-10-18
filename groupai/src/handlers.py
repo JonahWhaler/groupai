@@ -175,7 +175,7 @@ def escape_markdown_v2(text):
     for char in special_chars:
         text = text.replace(char, f'\\{char}')
     
-    return f"```{text}```"
+    return f"```\n{text}\n```"
 
 
 async def ask_handler(update: Update, context: CallbackContext) -> None:
