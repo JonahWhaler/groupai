@@ -34,14 +34,24 @@ class KnowledgeHandler:
     def add(self, namespace: str, identifier: str, knowledge: str, metadata: dict):
         ids, knowledge_chunks, metadatas, embeddings = self.preprocessing(
             identifier, knowledge, metadata)
-        collection = self.vdb.get_or_create_collection(name=namespace)
-        collection.add(documents=knowledge_chunks, metadatas=metadatas, ids=ids, embeddings=embeddings)
-    
+        collection = self.vdb.get_or_create_collection(
+            name=namespace, metadata={
+                "hnsw:space": "cosine"
+            }
+        )
+        collection.add(documents=knowledge_chunks,
+                       metadatas=metadatas, ids=ids, embeddings=embeddings)
+
     def update(self, namespace: str, identifier: str, knowledge: str, metadata: dict):
         ids, knowledge_chunks, metadatas, embeddings = self.preprocessing(
             identifier, knowledge, metadata)
-        collection = self.vdb.get_or_create_collection(name=namespace)
-        collection.update(documents=knowledge_chunks, metadatas=metadatas, ids=ids, embeddings=embeddings)
+        collection = self.vdb.get_or_create_collection(
+            name=namespace, metadata={
+                "hnsw:space": "cosine"
+            }
+        )
+        collection.update(documents=knowledge_chunks,
+                          metadatas=metadatas, ids=ids, embeddings=embeddings)
 
     def remove(self, namespace: str, method: str, identifier: Optional[str], metadata: Optional[dict]):
         pass

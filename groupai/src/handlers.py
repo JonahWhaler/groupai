@@ -187,7 +187,9 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
     await message.reply_text("=== PROCESSING... ===")
     namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
     tmp_directory = f'/file/{namespace}'
-    vector_collection = vdb_client.get_or_create_collection(name=namespace)
+    vector_collection = vdb_client.get_or_create_collection(name=namespace, metadata={
+        "hnsw:space": "cosine"
+    })
     # Instantiate the RAG model
     rag = BaseRAG(
         vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
