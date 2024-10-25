@@ -50,18 +50,18 @@ class CompactMessage:
     media: Optional[Media] = None
 
     def __str__(self):
-        output = f"{self.username}@{self.chatname}\n\n{self.text}\n\n@{self.lastUpdated}"
+        metadata = f"{self.username}@{self.chatname}@{self.lastUpdated}"
         if self.deleted:
-            output += " (deleted)"
+            metadata += " (deleted)"
         elif self.edited:
-            output += " (edited)"
+            metadata += " (edited)"
         if self.isForwarded:
-            output += f"\n\nForwarded from {self.author}({'bot' if self.isBot else 'user'})"
-
+            metadata += f"\n\nForwarded from {self.author}"
+        content = self.text
         if self.media.isMedia:
-            output += f"\n\n{str(self.media)}"
-        return output
-
+            content += f"\n\n{str(self.media)}"
+        return f"{content}\n<metadata>{metadata}</metadata>"
+    
     def to_dict(self):
         return self.__dict__
 
