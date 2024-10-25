@@ -15,7 +15,8 @@ import chromadb
 from storage import SQLite3_Storage
 from model import CompactMessage, Media
 # import myfunction
-from rag.base import BaseRAG
+# from rag.base import BaseRAG
+from rag.v1 import OneRAG
 from knowledge_handler import KnowledgeHandler
 from tlg_msg_scrapper import TlgMsgScraper
 
@@ -47,6 +48,7 @@ vdb_client = chromadb.Client(
 def get_metadata(message: CompactMessage) -> dict:
     metadata = dict()
     metadata["created"] = message.created
+    metadata["lastUpdated"] = message.lastUpdated
     metadata["username"] = message.username
     metadata["isAnswer"] = message.isAnswer
     metadata["isForwarded"] = message.isForwarded
@@ -191,8 +193,11 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
         "hnsw:space": "cosine"
     })
     # Instantiate the RAG model
-    rag = BaseRAG(
-        vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
+    # rag = BaseRAG(
+    #     vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
+    # )
+    rag = OneRAG(
+        vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10, initial_instruction=""
     )
     # Generate the response
     query_text = message.text.strip()
@@ -241,10 +246,12 @@ async def summary_handler(update: Update, context: CallbackContext) -> None:
         }
     )
     # Instantiate the RAG model
-    rag = BaseRAG(
-        vector_collection=vector_collection, 
-        embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, 
-        top_n=20, initial_instruction=os.environ["SUMMARY_PROMPT"]
+    # Instantiate the RAG model
+    # rag = BaseRAG(
+    #     vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
+    # )
+    rag = OneRAG(
+        vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10, initial_instruction=os.environ["SUMMARY_PROMPT"]
     )
     query_text: str = message.text.strip()
     query_text = query_text.replace("/summary ", "")
