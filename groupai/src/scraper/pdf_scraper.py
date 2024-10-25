@@ -135,11 +135,11 @@ class PDFToMarkdownScraper(BaseScraper):
                     if table:
                         markdown_content.append(
                             f"\n## Table {table_index} on Page {page_number}\n")
-                        markdown_content.append(
-                            "| " + " | ".join(table[0]) + " |")
-                        markdown_content.append(
-                            "|" + "|".join(["---"] * len(table[0])) + "|")
-                        for row in table[1:]:
+                        # markdown_content.append(
+                        #     "| " + " | ".join(table[0]) + " |")
+                        # markdown_content.append(
+                        #     "|" + "|".join(["---"] * len(table[0])) + "|")
+                        for row in table[:]:
                             markdown_content.append(
                                 "| " + " | ".join(str(cell) for cell in row) + " |")
                         markdown_content.append("\n")
