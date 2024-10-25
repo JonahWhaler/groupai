@@ -89,8 +89,12 @@ class OneRAG:
         docs = media_results['documents'][0]
         dists = media_results['distances'][0]
         metas = media_results['metadatas'][0]
-        max_threshold = np.percentile(dists, 80)
-        min_threshold = np.percentile(dists, 20)
+        if len(ids) > self.top_n:
+            max_threshold = np.percentile(dists, 50)
+            min_threshold = np.percentile(dists, 20)
+        else:
+            max_threshold = 2
+            min_threshold = 0
         relevant_docs: list[tuple[str, str, str, bool]] = []
         x = 0
         for id, doc, dist, meta in zip(ids, docs, dists, metas):
@@ -121,7 +125,6 @@ class OneRAG:
         metas = result['metadatas']
         chat_history = []
         for id, doc, meta in zip(ids, docs, metas):
-            logger.info(f"\n>>> id: {id}, doc: {doc}, meta: {meta}")
             chat = (id, doc, meta["lastUpdated"], meta["isAnswer"])
             chat_history.append(chat)
         if len(chat_history) == 0:
@@ -146,8 +149,12 @@ class OneRAG:
         docs = result['documents'][0]
         dists = result['distances'][0]
         metas = result['metadatas'][0]
-        max_threshold = np.percentile(dists, 80)
-        min_threshold = np.percentile(dists, 20)
+        if len(ids) > self.top_n:
+            max_threshold = np.percentile(dists, 50)
+            min_threshold = np.percentile(dists, 20)
+        else:
+            max_threshold = 2
+            min_threshold = 0
         chat_history = []
         x = 0
         for id, doc, dist, meta in zip(ids, docs, dists, metas):
