@@ -135,7 +135,7 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
         gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
     )
     metadata = get_metadata(processed_message)
-    logger.info(f"Metadat: {metadata}")
+    # logger.info(f"Metadat: {metadata}")
     logger.info(f"Information: {str(processed_message)}")
     if "edited_message" in context.user_data:
         knowledge_handler.update(namespace=namespace, identifier=processed_message.identifier,
