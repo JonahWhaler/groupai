@@ -93,9 +93,9 @@ class KnowledgeHandler:
 
     def text_to_chunks(self, text: str):
         tokenizer = tiktoken.encoding_for_model(self.embedding_model)
-        token_counts = len(tokenizer.encode(text))
-        if token_counts <= self.embedding_chunk_size:
-            return [text]
+        # token_counts = len(tokenizer.encode(text))
+        # if token_counts <= self.embedding_chunk_size:
+        #     return [text]
 
         chunks: List[str] = []
         for start in range(0, len(text), self.embedding_chunk_size * self.stride):
