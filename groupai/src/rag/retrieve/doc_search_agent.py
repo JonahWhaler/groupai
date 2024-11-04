@@ -3,7 +3,7 @@ import json
 import chromadb
 import openai
 from typing import Optional
-import numpy as np
+from .base import CallableTool
 
 FILE_EXPLORER_AGENT_PROMPT = """
 Description: Searching and analyzing content from the local vector database of documents and files.
@@ -30,7 +30,7 @@ Returns:
 """
 
 
-class FileExplorerAgent:
+class FileExplorerAgent(CallableTool):
     def __init__(
         self, priority: int = 1, next_func: Optional[str] = None,
         vector_database: Optional[chromadb.ClientAPI] = None,
@@ -43,15 +43,22 @@ class FileExplorerAgent:
         self.__embedding_model = embedding_model
 
     @property
-    def priority(self):
+    def priority(self) -> int:
         return self.__priority
 
     @property
-    def prompt(self):
+    def name(self) -> str:
+        return self.__name
+    
+    @property
+    def description(self) -> str:
         return FILE_EXPLORER_AGENT_PROMPT
     
-    @classmethod
-    def validate(cls, params: str) -> bool:
+    @property
+    def next_tool_name(self) -> str | None:
+        return self.__next_func
+    
+    def validate(self, params: str) -> bool:
         params = json.loads(params)
         namespace: str = params.get("namespace", None)
         query: str = params.get("query", None)
@@ -99,8 +106,8 @@ class FileExplorerAgent:
         dists = relevant_docs['distances'][0]
         metas = relevant_docs['metadatas'][0]
         if len(ids) >= 5:
-            max_threshold = np.percentile(dists, 50)
-            min_threshold = np.percentile(dists, 20)
+            max_threshold = self._calculate_percentile(dists, 50)
+            min_threshold = self._calculate_percentile(dists, 20)
         else:
             max_threshold = 2
             min_threshold = 0
@@ -120,3 +127,30 @@ class FileExplorerAgent:
         print(f"End Execution: {self.__name}")
         output["result"] = relevant_docs
         return output, self.__next_func
+
+    def _calculate_percentile(self, data: list, percentile: float):
+        # Validation
+        if not data:
+            raise ValueError("Input list cannot be empty.")
+
+        n = len(data)
+        if n == 1:
+            return data[0]
+        
+        if percentile < 0 or percentile > 100:
+            raise ValueError("Percentile must be between 0 and 100.")
+        
+        sorted_data = sorted(data)
+        index = (n - 1) * percentile / 100
+
+        lower_index = int(index)
+        upper_index = lower_index + 1
+
+        lower_value = sorted_data[lower_index]
+        upper_value = sorted_data[upper_index]
+
+        interpolated_value = lower_value + (index - lower_index) * (
+            upper_value - lower_value
+        )
+
+        return interpolated_value
