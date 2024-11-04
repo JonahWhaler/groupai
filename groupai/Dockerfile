@@ -3,7 +3,7 @@ FROM debian:stable-slim
 RUN apt-get update
 RUN apt-get install -y python3 python3-pip python3-dev build-essential python3-venv ffmpeg libopus-dev
 
-RUN mkdir -p /code /file
+RUN mkdir -p /code /file /logs /vect
 
 ADD ./requirements.txt ./
 

@@ -37,13 +37,18 @@ CHUNK_SIZE = 4096
 MAX_CHUNK_SIZE = 8100
 
 openai.api_key = os.environ["OPENAI_API_KEY"]
-vdb_client = chromadb.Client(
+chat_vdb = chromadb.Client(
     settings=chromadb.Settings(
         is_persistent=True,
-        persist_directory="/file",
+        persist_directory="/vect/chat",
     )
 )
-
+file_vdb = chromadb.Client(
+    settings=chromadb.Settings(
+        is_persistent=True,
+        persist_directory="/vect/file",
+    )
+)
 
 def get_metadata(message: CompactMessage) -> dict:
     metadata = dict()
@@ -130,7 +135,7 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
 
     knowledge_handler = KnowledgeHandler(
         tmp_directory=tmp_directory,
-        vdb=vdb_client,
+        vdb=chat_vdb,
         embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
         gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
     )
@@ -189,7 +194,7 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
     await message.reply_text("=== PROCESSING... ===")
     namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
     tmp_directory = f'/file/{namespace}'
-    vector_collection = vdb_client.get_or_create_collection(name=namespace, metadata={
+    vector_collection = chat_vdb.get_or_create_collection(name=namespace, metadata={
         "hnsw:space": "cosine"
     })
     # Instantiate the RAG model
@@ -223,7 +228,7 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
     # Store the knowledge in the knowledge base
     knowledge_handler = KnowledgeHandler(
         tmp_directory=tmp_directory,
-        vdb=vdb_client,
+        vdb=chat_vdb,
         embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
         gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
     )
@@ -240,7 +245,7 @@ async def summary_handler(update: Update, context: CallbackContext) -> None:
     await message.reply_text("=== PROCESSING... ===")
     namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
     tmp_directory = f'/file/{namespace}'
-    vector_collection = vdb_client.get_or_create_collection(
+    vector_collection = chat_vdb.get_or_create_collection(
         name=namespace, metadata={
             "hnsw:space": "cosine"
         }
@@ -280,7 +285,7 @@ async def summary_handler(update: Update, context: CallbackContext) -> None:
     # Store the knowledge in the knowledge base
     knowledge_handler = KnowledgeHandler(
         tmp_directory=tmp_directory,
-        vdb=vdb_client,
+        vdb=chat_vdb,
         embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
         gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
     )

@@ -11,6 +11,7 @@ services:
         volumes:
             - "./storage/data:/file:rw"
             - "./storage/logs:/logs:rw"
+            - "./storage/vect:/vect:rw"
         deploy:
             resources:
                 limits:
