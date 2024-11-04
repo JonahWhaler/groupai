@@ -113,7 +113,7 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
     if processed_message.media.isMedia:
         media_file = await context.bot.get_file(processed_message.media.fileid)
         # Issue: More than one user upload file with the same filename
-        tmp_path = f'{tlg_msg_scraper.tmp_directory}/{processed_message.media.filename}'
+        tmp_path = f'{tmp_directory}/{processed_message.media.filename}'
         await media_file.download_to_drive(tmp_path)
         processed_message.media.markdown = tlg_msg_scraper.to_markdown(
             processed_message)
@@ -121,7 +121,7 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
         context.user_data['media_markdown'] = processed_message.media.markdown
 
     # Store the CompactMessage in an SQLite database
-    storage = SQLite3_Storage(f"/file/{namespace}.db", overwrite=False)
+    storage = SQLite3_Storage(f"{tmp_directory}/storage.db", overwrite=False)
     if processed_message.edited:
         old_message = storage.get(processed_message.identifier)
         if old_message:
@@ -218,7 +218,7 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
     processed_message = await tlg_msg_scraper.preprocessing(reply_msg, False)
     processed_message.isAnswer = True
     # Store the response in an SQLite database
-    storage = SQLite3_Storage(f"/file/{namespace}.db", overwrite=False)
+    storage = SQLite3_Storage(f"{tmp_directory}/storage.db", overwrite=False)
     storage.set(processed_message.identifier, processed_message.to_dict())
     # Store the knowledge in the knowledge base
     knowledge_handler = KnowledgeHandler(
@@ -275,7 +275,7 @@ async def summary_handler(update: Update, context: CallbackContext) -> None:
     processed_message = await tlg_msg_scraper.preprocessing(reply_msg, False)
     processed_message.isAnswer = True
     # Store the response in an SQLite database
-    storage = SQLite3_Storage(f"/file/{namespace}.db", overwrite=False)
+    storage = SQLite3_Storage(f"{tmp_directory}/storage.db", overwrite=False)
     storage.set(processed_message.identifier, processed_message.to_dict())
     # Store the knowledge in the knowledge base
     knowledge_handler = KnowledgeHandler(
