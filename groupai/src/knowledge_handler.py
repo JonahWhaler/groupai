@@ -98,7 +98,7 @@ class KnowledgeHandler:
         #     return [text]
 
         chunks: List[str] = []
-        for start in range(0, len(text), self.embedding_chunk_size * self.stride):
+        for start in range(0, len(text), self.stride):
             end = min(start + self.embedding_chunk_size, len(text))
             chunk = text[start:end]
             chunks.append(chunk)
