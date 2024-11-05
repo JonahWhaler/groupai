@@ -1,9 +1,8 @@
-import os
 import json
 import chromadb
-import openai
 from typing import Optional
-from .base import CallableTool
+from .base import BaseTool
+from .util import Encoder
 
 FILE_EXPLORER_AGENT_PROMPT = """
 Description: Searching and analyzing content from the local vector database of documents and files.
@@ -30,34 +29,22 @@ Returns:
 """
 
 
-class FileExplorerAgent(CallableTool):
+class FileExplorerAgent(BaseTool):
     def __init__(
-        self, priority: int = 1, next_func: Optional[str] = None,
-        vector_database: Optional[chromadb.ClientAPI] = None,
-        embedding_model: str = "text-embedding-3-small",
+            self, priority: int = 1, next_func: Optional[str] = None,
+            vector_database: Optional[chromadb.ClientAPI] = None,
+            encoder: Encoder = Encoder(), threshold: float = 0.5
     ):
-        self.__name = "FileExplorerAgent"
-        self.__priority = priority
-        self.__next_func = next_func
+        super().__init__(
+            tool_name="FileExplorerAgent",
+            description=FILE_EXPLORER_AGENT_PROMPT,
+            priority=priority,
+            next_func=next_func
+        )
         self.__vdb = vector_database
-        self.__embedding_model = embedding_model
+        self.encoder = encoder
+        self.__threshold = threshold
 
-    @property
-    def priority(self) -> int:
-        return self.__priority
-
-    @property
-    def name(self) -> str:
-        return self.__name
-    
-    @property
-    def description(self) -> str:
-        return FILE_EXPLORER_AGENT_PROMPT
-    
-    @property
-    def next_tool_name(self) -> str | None:
-        return self.__next_func
-    
     def validate(self, params: str) -> bool:
         params = json.loads(params)
         namespace: str = params.get("namespace", None)
@@ -66,69 +53,57 @@ class FileExplorerAgent(CallableTool):
         if query is None or namespace is None:
             return False
         query = query.strip()
-        condition = [len(query) > 0, len(query) <= 200, top_n >= 1, top_n <= 20]
+        condition = [len(query) > 0, len(query) <=
+                     200, top_n >= 1, top_n <= 20]
         if not all(condition):
             return False
         return True
 
-    def _text_to_embedding(self, text: str):
-        try:
-            client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-            response = client.embeddings.create(
-                input=text, model=self.__embedding_model)
-            return response.data[0].embedding
-        except Exception as e:
-            # logger.error(f"text_to_embedding: {e}")
-            raise
-
-    async def __call__(self, params: str) -> tuple[dict, str | None]:
+    async def __call__(self, params: str) -> dict:
+        if not self.validate(params):
+            return {"error": "Invalid parameters for FileExplorerAgent"}
         params = json.loads(params)
         namespace = params.get("namespace", None)
         query = params.get("query", None)
         top_n = params.get("top_n", 20)
-        print(f"Begin Execution: {self.__name}...")
         v_collection = self.__vdb.get_or_create_collection(
             name=namespace, metadata={"hnsw:space": "cosine"}
         )
         output = dict()
-        if self.__vdb is not None:
-            query_embedding = self._text_to_embedding(query)
-            relevant_docs = v_collection.query(query_embedding, n_results=top_n,
-                                               where={
-                                                   "$and": [
-                                                       {"deleted": False},
-                                                       {"isMedia": True}
-                                                   ]
-                                               },
-                                               include=['metadatas', 'documents', 'distances'])
-        ids = relevant_docs['ids'][0]
-        docs = relevant_docs['documents'][0]
-        dists = relevant_docs['distances'][0]
-        metas = relevant_docs['metadatas'][0]
+        query_embedding = self.encoder.text_to_embedding(query)
+        results = v_collection.query(query_embedding, n_results=top_n,
+                                     where={
+                                         "$and": [
+                                             {"deleted": False},
+                                             {"isMedia": True}
+                                         ]
+                                     },
+                                     include=['metadatas', 'documents', 'distances'])
+        ids = results['ids'][0]
+        docs = results['documents'][0]
+        dists = results['distances'][0]
+        metas = results['metadatas'][0]
         if len(ids) >= 5:
-            max_threshold = self._calculate_percentile(dists, 50)
-            min_threshold = self._calculate_percentile(dists, 20)
+            max_threshold = FileExplorerAgent.calculate_percentile(data=dists, percentile=50)
+            min_threshold = FileExplorerAgent.calculate_percentile(data=dists, percentile=20)
         else:
             max_threshold = 2
             min_threshold = 0
         relevant_docs: list[tuple[str, str, str, bool]] = []
-        x = 0
-        for id, doc, dist, meta in zip(ids, docs, dists, metas):
-            x += dist
-            d = (id, doc, meta["lastUpdated"], False)
+        for identifier, doc, dist, meta in zip(ids, docs, dists, metas):
+            d = (identifier, doc, meta["lastUpdated"], False)
             if min_threshold <= dist <= max_threshold:
                 # Whether to polish the doc with metadata
                 relevant_docs.append(d)
-            elif dist < self.threshold:
+            elif dist < self.__threshold:
                 relevant_docs.append(d)
-        if len(relevant_docs) == 0:
-            return relevant_docs
-        relevant_docs.sort(key=lambda x: x[2])
-        print(f"End Execution: {self.__name}")
+        if len(relevant_docs) != 0:
+            relevant_docs.sort(key=lambda x: x[2])
         output["result"] = relevant_docs
-        return output, self.__next_func
+        return output
 
-    def _calculate_percentile(self, data: list, percentile: float):
+    @classmethod
+    def calculate_percentile(cls, data: list, percentile: float) -> float:
         # Validation
         if not data:
             raise ValueError("Input list cannot be empty.")
@@ -136,10 +111,10 @@ class FileExplorerAgent(CallableTool):
         n = len(data)
         if n == 1:
             return data[0]
-        
+
         if percentile < 0 or percentile > 100:
             raise ValueError("Percentile must be between 0 and 100.")
-        
+
         sorted_data = sorted(data)
         index = (n - 1) * percentile / 100
 
@@ -150,7 +125,7 @@ class FileExplorerAgent(CallableTool):
         upper_value = sorted_data[upper_index]
 
         interpolated_value = lower_value + (index - lower_index) * (
-            upper_value - lower_value
+                upper_value - lower_value
         )
 
         return interpolated_value

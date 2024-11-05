@@ -1,7 +1,11 @@
 import json
 import aiohttp
 import asyncio
-from .base import CallableTool
+from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
+from datetime import datetime
+from random import choice as random_choice
+from .base import BaseTool
 
 WEB_EXPLORER_AGENT_PROMPT = """
 Description: Execute web searches via DuckDuckGo, collect factual information from reliable online sources
@@ -13,7 +17,16 @@ Parameters:
 
 Returns:
 
-`response` (dict): {"result": [{"title": "{TITLE}", "href": "{URL}", "body": "{WEBPAGE_SUMMARY}", "text": "{WEBPAGE_CONTENT}"}]}
+`response` (dict): {
+    "result": [
+                (
+                    "web_search_result", 
+                    {"title": "{TITLE}", "href": "{URL}", "body": "{WEBPAGE_SUMMARY}", "text": "{WEBPAGE_CONTENT}"}, 
+                    "{TIMESTAMP}", 
+                    True
+                )
+            ]
+        }
 `next_func` (string): The name of the next function to call.
 
 Keywords: web, internet, online, search, Wikipedia, article, webpage, website, URL, DuckDuckGo, browser, HTTP, link, database, reference, citation, source, fact-check, current, updated, recent, global, worldwide, information
@@ -28,40 +41,26 @@ Relevant Query Types:
 """
 
 
-class DuckDuckGoSearchAgent(CallableTool):
+class DuckDuckGoSearchAgent(BaseTool):
     def __init__(self, priority=1, next_func: str | None = None, safesearch="moderate", region="my-en", pause=0.5):
-        self.__name = "DuckDuckGoSearchAgent"
+        super().__init__(
+            tool_name="DuckDuckGoSearchAgent",
+            description=WEB_EXPLORER_AGENT_PROMPT,
+            priority=priority,
+            next_func=next_func
+        )
         self.__safesearch = safesearch  # on, moderate, off
         self.__region = region
         self.__pause = pause
-        self.__priority = priority
-        self.__next_func = next_func
 
-    @property
-    def priority(self) -> int:
-        return self.__priority
-
-    @property
-    def name(self) -> str:
-        return self.__name
-    
-    @property
-    def description(self) -> str:
-        return WEB_EXPLORER_AGENT_PROMPT
-
-    @property
-    def next_tool_name(self) -> str | None:
-        return self.__next_func
-    
     @property
     def random_user_agent(self) -> str:
-        import random
         user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15',
             'Mozilla/5.0 (X11; Linux x86_64) Firefox/120.0'
         ]
-        return random.choice(user_agents)
+        return random_choice(user_agents)
 
     def validate(self, params: str) -> bool:
         params = json.loads(params)
@@ -76,17 +75,15 @@ class DuckDuckGoSearchAgent(CallableTool):
             return False
         return True
 
-    async def __call__(self, params: str) -> tuple[dict, str | None]:
-        from duckduckgo_search import DDGS
-        from datetime import datetime
+    async def __call__(self, params: str) -> dict:
         # Validate parameters
         if not self.validate(params):
-            return {"error": "Invalid parameters for DuckDuckGoSearchAgent"}, None
+            return {"error": "Invalid parameters for DuckDuckGoSearchAgent"}
         # Load parameters
         params = json.loads(params)
         query = params.get("query", None)
         top_n = params.get("top_n", 5)
-        
+
         output = dict()
         top_search = []
         with DDGS() as ddgs:
@@ -98,9 +95,10 @@ class DuckDuckGoSearchAgent(CallableTool):
             for r, sr in zip(top_search, search_results):
                 r['html'] = sr
         web_search_result = "\n\n".join([json.dumps(r) for r in top_search])
-        output["result"] =  [("web_search_result", web_search_result, datetime.now().isoformat(), True)]
-        return output, self.__next_func
-    
+        output["result"] = [
+            ("web_search_result", web_search_result, datetime.now().isoformat(), True)]
+        return output
+
     @property
     def headers(self) -> dict:
         return {
@@ -116,14 +114,13 @@ class DuckDuckGoSearchAgent(CallableTool):
             'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0',
         }
-    
+
     async def _fetch_data(self, session, url):
-        from bs4 import BeautifulSoup
         try:
             await asyncio.sleep(self.__pause)
             async with session.get(url, headers=self.headers) as response:
                 data = await response.text()
                 soup = BeautifulSoup(data, 'html.parser')
                 return soup.find('body').text
-        except Exception as e:
+        except Exception as _:
             return "Webpage not available, either due to an error or due to lack of access permissions to the site."
