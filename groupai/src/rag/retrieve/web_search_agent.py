@@ -78,6 +78,7 @@ class DuckDuckGoSearchAgent(CallableTool):
 
     async def __call__(self, params: str) -> tuple[dict, str | None]:
         from duckduckgo_search import DDGS
+        from datetime import datetime
         # Validate parameters
         if not self.validate(params):
             return {"error": "Invalid parameters for DuckDuckGoSearchAgent"}, None
@@ -96,7 +97,8 @@ class DuckDuckGoSearchAgent(CallableTool):
             search_results = await asyncio.gather(*tasks)
             for r, sr in zip(top_search, search_results):
                 r['html'] = sr
-            output["result"] = top_search
+        web_search_result = "\n\n".join([json.dumps(r) for r in top_search])
+        output["result"] =  [("web_search_result", web_search_result, datetime.now().isoformat(), True)]
         return output, self.__next_func
     
     @property
