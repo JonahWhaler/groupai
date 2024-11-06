@@ -9,7 +9,7 @@ Description: Searching and analyzing content from the local vector database of d
 
 Parameters:
 
-`query` (string): The query to be executed on DuckDuckGo. Constraint: 1 <= len(query) <= 200
+`query` (string): The query to be executed on local vector database. Constraint: 1 <= len(query) <= 200
 `namespace` (string): The namespace to search in.
 `top_n` (int): The number of results to return. Default is 5. Constraint: 1 <= top_n <= 20
 
