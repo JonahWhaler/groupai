@@ -165,3 +165,5 @@ asset/
 storage/
 config.env
 tests/
+
+.vscode/
