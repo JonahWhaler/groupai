@@ -1,6 +1,7 @@
 import logging
 import time
 import os
+from typing import Any, Callable, Coroutine, Tuple
 
 import telegram
 from telegram.ext import (
@@ -11,7 +12,6 @@ from telegram.ext import (
     AIORateLimiter,
     filters,
 )
-from typing import Any, Callable, Coroutine, Tuple, Optional
 import handlers
 
 logging.basicConfig(
@@ -20,23 +20,37 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%d-%b-%y %H:%M:%S",
 )
+# logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
 
 
 def run_bot(bot: Application) -> None:
     allowed_list: list[int] = []
-    
+
     for key, value in os.environ.items():
         if key.startswith("ALLOWED_"):
+            logger.info("Processing (%s, %s)", key, value)
             allowed_list.append(int(value))
-    
+    logger.info("Allowed List: %s", allowed_list)
     allowed_list = filters.User(user_id=allowed_list)
-    bot.add_handler(MessageHandler(filters.ALL & allowed_list, handlers.middleware_function), group=0)
+    bot.add_handler(
+        MessageHandler(filters.ALL & allowed_list, handlers.middleware_function),
+        group=0,
+    )
     # bot.add_handler(CommandHandler("export", handlers.export_handler, filters=allowed_list), group=1)
-    bot.add_handler(CommandHandler("help", handlers.help_handler, filters=allowed_list), group=1)
-    bot.add_handler(CommandHandler("ask", handlers.ask_handler, filters=allowed_list), group=1)
-    bot.add_handler(MessageHandler(filters.TEXT & allowed_list, handlers.message_handler), group=1)
+    bot.add_handler(
+        CommandHandler("help", handlers.help_handler, filters=allowed_list), group=1
+    )
+    bot.add_handler(
+        CommandHandler("ask", handlers.ask_handler, filters=allowed_list), group=1
+    )
+    bot.add_handler(
+        CommandHandler("summary", handlers.summary_handler, filters=allowed_list), group=1
+    )
+    bot.add_handler(
+        MessageHandler(filters.TEXT & allowed_list, handlers.message_handler), group=1
+    )
     bot.add_error_handler(handlers.error_handler)
     bot.run_polling(poll_interval=0)
 
@@ -103,7 +117,12 @@ if __name__ == "__main__":
     delay, delay_factor = 5.0, 1.5
 
     token = os.getenv("TLG_TOKEN")
-    max_retry = int(os.getenv("MAX_RETRY", 5))
+    assert isinstance(token, str)
+    max_retry: str | int | None = os.environ["MAX_RETRY"]
+    if max_retry is None:
+        max_retry = 5
+    elif isinstance(max_retry, str):
+        max_retry = int(max_retry)
 
     while True:
         try:
@@ -123,7 +142,9 @@ if __name__ == "__main__":
             run_bot(application)
             break
         except telegram.error.TimedOut as error:
-            logger.error(f"{type(error)}: {str(error)}")  # AttributeError: type object 'TimedOut' has no attribute 'name'
+            logger.error(
+                "ErrorType: %s, ErrorMessage: %s", type(error), str(error)
+            )  # AttributeError: type object 'TimedOut' has no attribute 'name'
             # Update timeout
             timeout_factor = update_timeout_factor(timeout_factor)
             (

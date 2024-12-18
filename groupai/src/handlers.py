@@ -1,57 +1,49 @@
+import re
 import logging
 import os
-import io
-from time import time
+from typing import Optional
+import time
+from datetime import datetime
+
 import telegram
-from telegram import Message, Update
+from telegram import Update
 from telegram.ext import CallbackContext
 from telegram.constants import ParseMode
-from typing import Optional, List
-import openai
-import chromadb
-# import tiktoken
-# from copy import deepcopy
 
-from storage import SQLite3_Storage
-from model import CompactMessage, Media
-# import myfunction
-# from rag.base import BaseRAG
-from rag.v1 import OneRAG
-from knowledge_handler import KnowledgeHandler
+import chromadb
+
+from llm_agent_toolkit.core import local, open_ai
+from llm_agent_toolkit.encoder.remote import OpenAIEncoder
+from llm_agent_toolkit.encoder.local import OllamaEncoder
+from llm_agent_toolkit.chunkers import SemanticChunker, FixedGroupChunker
+from llm_agent_toolkit._memory import ShortTermMemory
+from llm_agent_toolkit.memory import ChromaMemory
+from llm_agent_toolkit import ChatCompletionConfig, ImageGenerator, Transcriber, TranscriptionConfig, Core
+from llm_agent_toolkit.transcriber.open_ai import OpenAITranscriber
+
+import config
+from model import CompactMessage
+
+from rag.v1 import OneRAG  # type: ignore
 from tlg_msg_scrapper import TlgMsgScraper
+from myfunction import ChromaDBFactory
 
 logger = logging.getLogger(__name__)
-master = os.getenv("MASTER_TLG_ID", 0)
-assert master != 0
 
-GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
-VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")
-AUDIO_MODEL = os.getenv("AUDIO_MODEL", "whisper-1")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-
-# Note!!!
-# Conversavative Estimation: 1 token = 1 character.
-CONTEXT_WINDOW = 128000
-CONTEXT_BUFFER = 1000
-CHUNK_SIZE = 4096
-MAX_CHUNK_SIZE = 8100
-
-openai.api_key = os.environ["OPENAI_API_KEY"]
-chat_vdb = chromadb.Client(
-    settings=chromadb.Settings(
-        is_persistent=True,
-        persist_directory="/vect/chat",
-    )
+# Define Global Variables
+local.OllamaCore.load_csv("/files/ollama.csv")
+encoder = OllamaEncoder(
+    connection_string=config.CONNECTION_STRING, model_name=config.emb_model_name
 )
-file_vdb = chromadb.Client(
-    settings=chromadb.Settings(
-        is_persistent=True,
-        persist_directory="/vect/file",
-    )
-)
+llm: Core = local.Text_to_Text(connection_string=config.CONNECTION_STRING, **config.main_t2t_config)
+ii: ImageGenerator = local.Image_to_Text(connection_string=config.CONNECTION_STRING, **config.main_i2t_config)
+transcriber: Transcriber = OpenAITranscriber(TranscriptionConfig(name=config.a2t_model_name))
+main_vdb: chromadb.ClientAPI = ChromaDBFactory.get_instance(persist=True, persist_directory="/vect/main")
+chat_memory: dict[str, ShortTermMemory] = {}
+
 
 def get_metadata(message: CompactMessage) -> dict:
-    metadata = dict()
+    metadata = {}
     metadata["created"] = message.created
     metadata["lastUpdated"] = message.lastUpdated
     metadata["username"] = message.username
@@ -65,6 +57,7 @@ def get_metadata(message: CompactMessage) -> dict:
     metadata["isMedia"] = message.media.isMedia
     if message.media.isMedia:
         metadata["mime_type"] = message.media.mime_type
+    metadata["label"] = "file" if message.media.isMedia else "chat"
     return metadata
 
 
@@ -87,28 +80,32 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
         No exceptions are explicitly raised, but errors are logged.
 
     """
-    logger.info(f"\nMiddleware Function => Update: {update}")
+    global chat_memory, main_vdb
+    logger.info("\nMiddleware Function => Update: %s", update)
     # Extract the message or edited message from the update
     message: Optional[telegram.Message] = getattr(update, "message", None)
-    edited_message: Optional[telegram.Message] = getattr(
-        update, "edited_message", None
-    )
+    edited_message: Optional[telegram.Message] = getattr(update, "edited_message", None)
     if not message and not edited_message:
-        logger.error(
-            f"\nException: [Message Body Not Found]=> Update: {update}")
+        logger.error("\nException: [Message Body Not Found]=> Update: %s", update)
         return None
-    
-    if edited_message:
+
+    if edited_message and context.user_data:
         context.user_data["edited_message"] = True
-        namespace = f'g{edited_message.chat.id}' if edited_message.chat.id < 0 else str(edited_message.chat.id)
+        namespace = (
+            f"g{edited_message.chat.id}"
+            if edited_message.chat.id < 0
+            else str(edited_message.chat.id)
+        )
+    elif message:
+        namespace = (
+            f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
+        )
     else:
-        namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
-    
-    tmp_directory = f'/file/{namespace}'
+        raise ValueError("Message is None.")
+
+    tmp_directory = f"/file/{namespace}"
     tlg_msg_scraper = TlgMsgScraper(
-        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
-        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW,
-        vision_model=VISION_MODEL, audio_model=AUDIO_MODEL, tmp_directory=tmp_directory
+        tmp_directory=tmp_directory, image_interpreter=ii, transcriber=transcriber
     )
     if edited_message:
         processed_message = await tlg_msg_scraper.preprocessing(edited_message, True)
@@ -118,181 +115,317 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
     if processed_message.media.isMedia:
         media_file = await context.bot.get_file(processed_message.media.fileid)
         # Issue: More than one user upload file with the same filename
-        tmp_path = f'{tmp_directory}/{processed_message.media.filename}'
+        tmp_path = f"{tmp_directory}/{processed_message.media.filename}"
         await media_file.download_to_drive(tmp_path)
         processed_message.media.markdown = tlg_msg_scraper.to_markdown(
-            processed_message)
+            processed_message, input_path=tmp_path
+        )
         os.remove(tmp_path)
-        context.user_data['media_markdown'] = processed_message.media.markdown
+        if context.user_data:
+            context.user_data["media_markdown"] = processed_message.media.markdown
+        else:
+            logger.warning("context.user_data is None.")
 
-    # Store the CompactMessage in an SQLite database
-    storage = SQLite3_Storage(f"{tmp_directory}/storage.db", overwrite=False)
-    if processed_message.edited:
-        old_message = storage.get(processed_message.identifier)
-        if old_message:
-            processed_message.created = old_message['created']
-    storage.set(processed_message.identifier, processed_message.to_dict())
-
-    knowledge_handler = KnowledgeHandler(
-        tmp_directory=tmp_directory,
-        vdb=chat_vdb,
-        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
-        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
-    )
     metadata = get_metadata(processed_message)
     # logger.info(f"Metadat: {metadata}")
-    logger.info(f"Information: {str(processed_message)}")
-    if "edited_message" in context.user_data:
-        knowledge_handler.update(namespace=namespace, identifier=processed_message.identifier,
-                          knowledge=str(processed_message), metadata=metadata)
+    content = str(processed_message)
+    logger.info("Information: %s", content)
+    K = max(len(content) // encoder.ctx_length * 2, 1)
+    if processed_message.media.isMedia and K > 1:
+        chunker = SemanticChunker(
+            encoder=encoder,
+            config={
+                "K": K,
+                "MAX_ITERATION": 50,
+                "update_rate": 0.3,
+                "min_coverage": 0.9,
+            },
+        )
     else:
-        knowledge_handler.add(namespace=namespace, identifier=processed_message.identifier,
-                          knowledge=str(processed_message), metadata=metadata)
+        chunker = FixedGroupChunker(
+            config={
+                "K": max(K, 1)
+            }
+        )
+    vm = ChromaMemory(
+        vdb=main_vdb,
+        encoder=encoder,
+        chunker=chunker,
+        namespace=namespace,
+        overwrite=False,
+    )
+    # if "edited_message" in context.user_data:
+    #     vm.update
+    vm.add(
+        document_string=content,
+        identifier=processed_message.identifier,
+        metadata=metadata,
+    )
+    if namespace not in chat_memory:
+        logger.info("Register %s to chat_memory.", namespace)
+        chat_memory[namespace] = ShortTermMemory(max_entry=20)
+    chat_memory[namespace].push({"role": "user", "content": content})
 
 
 async def error_handler(update: object, context: CallbackContext):
-    logger.error(msg="Exception while handling an update:",
-                 exc_info=context.error)
-    logger.info(f"\nError Handler => Update: {update}")
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    logger.info("\nError Handler => Update: %s", update)
 
 
+# pylint: disable-next=unused-argument
 async def help_handler(update: Update, context: CallbackContext) -> None:
-    await update.message.reply_text("https://github.com/JonahTzuChi/groupai")
+    if update.message is None:
+        raise ValueError("update.message is None")
+    await update.message.reply_text(os.environ["REPO_PATH"])
 
 
 async def message_handler(update: Update, context: CallbackContext) -> None:
-    if "edited_message" in context.user_data:
+    if context.user_data and "edited_message" in context.user_data:
         message = getattr(update, "edited_message", None)
     else:
         message = getattr(update, "message", None)
+    if message is None:
+        raise ValueError("Message is None.")
     await message.reply_text("=== COPY ===")
 
 
-def escape_markdown_v2(text):
+def escape_markdown(text):
     """
-    Escape special characters for Telegram's MarkdownV2.
+    Escape special characters for Telegram's HTMLV2.
     """
+    import re
     # Characters that need to be escaped
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    
+    special_chars = [
+        "_",
+        # "*",
+        "[",
+        "]",
+        "(",
+        ")",
+        # "~",
+        # "`",
+        ">",
+        # "#",
+        "+",
+        "-",
+        "=",
+        "|",
+        "{",
+        "}",
+        ".",
+        "!",
+    ]
+
     # Escape backslash first to avoid double escaping
-    text = text.replace('\\', '\\\\')
-    
-    # Escape special characters
+    # text = text.replace("\\", "\\\\")
+    _text = text[:]
+    # # Escape special characters
     for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+        _text = _text.replace(char, f"\\{char}")
+
+    _text = re.sub(r"#{1,} (.*?)\n", r"**\1**\n", _text)
+    _text = _text.replace("#", r"\#")
+    return _text
+
+
+def escape_html(text):
+    _text = text[:]
+    special_characters = [">", "<", "&", "="]
+    for c in special_characters:
+        _text = _text.replace(c, f"\{c}")
+    _text = _text.replace("```python", "```")
+    return _text
+
+def add_to_vector_memory(namespace: str, identifier: str, data: str, metadata: dict):
+    global chat_memory, main_vdb
+    if len(data) >= encoder.ctx_length:
+        chunker = SemanticChunker(
+            encoder=encoder,
+            config={
+                "K": len(data) // encoder.ctx_length,
+                "MAX_ITERATION": 20,
+                "update_rate": 0.3,
+                "min_coverage": 0.9,
+            },
+        )
+    else:
+        chunker = FixedGroupChunker(config={"K": 1})
+
+    # Store the knowledge in the knowledge base
+    vm = ChromaMemory(
+        vdb=main_vdb,
+        encoder=encoder,
+        chunker=chunker,
+        namespace=namespace,
+        overwrite=False,
+    )
+    vm.add(
+        document_string=data,
+        identifier=identifier,
+        metadata=metadata,
+    )
+
+
+def handle_triple_ticks(text: str, closed: bool):
+    TRIPLE_TICKS = "```"
+    t = text[:]
+    if not closed:
+        t = TRIPLE_TICKS + t
+    close = len(re.findall(TRIPLE_TICKS, t)) % 2 == 0
+    if not close:
+        t += TRIPLE_TICKS
+    return t, close
     
-    return f"```\n{text}\n```"
-
-
 async def ask_handler(update: Update, context: CallbackContext) -> None:
-    if "edited_message" in context.user_data:
+    global chat_memory, main_vdb, encoder, llm
+    if context.user_data and "edited_message" in context.user_data:
         message = getattr(update, "edited_message", None)
     else:
         message = getattr(update, "message", None)
-        
+
+    if message is None:
+        raise ValueError("Message is None.")
     await message.reply_text("=== PROCESSING... ===")
-    namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
-    tmp_directory = f'/file/{namespace}'
-    vector_collection = chat_vdb.get_or_create_collection(name=namespace, metadata={
-        "hnsw:space": "cosine"
-    })
-    # Instantiate the RAG model
-    # rag = BaseRAG(
-    #     vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
-    # )
+    namespace = f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
+    # tmp_directory = f"/file/{namespace}"
+    chunker = FixedGroupChunker(config={"K": 1})
+    vm = ChromaMemory(
+        vdb=main_vdb,
+        encoder=encoder,
+        chunker=chunker,
+        namespace=namespace,
+        overwrite=False,
+    )
     rag = OneRAG(
-        vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10, initial_instruction=""
+        vector_collection=vm,
+        chat_cache=chat_memory[namespace],
+        encoder=encoder,
+        llm=llm,
+        top_n=10,
     )
     # Generate the response
     query_text = message.text.strip()
     query_text = query_text.replace("/ask ", "")
-    if "media_markdown" in context.user_data:
+    if context.user_data and "media_markdown" in context.user_data:
         query_text += f"\n\n{context.user_data['media_markdown']}"
 
-    answer = rag(query_text)
-    answer = escape_markdown_v2(answer)
+    # answer = rag(query=query_text, user_identifier=namespace)
+    answer = await rag.invoke(query=query_text, user_identifier=namespace)
+    answer = escape_markdown(answer)
+    # answer = escape_markdown(answer)
     # Send the response
-    logger.info(f"Answer: {answer}")
-    reply_msg = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
-    tlg_msg_scraper = TlgMsgScraper(
-        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
-        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW,
-        vision_model=VISION_MODEL, audio_model=AUDIO_MODEL, tmp_directory=tmp_directory
+    logger.info("Answer: %s", answer)
+
+    if len(answer) >= 4096:
+        sections = re.split(r"\n{2,}", answer)
+        current_chunk = ""
+        is_close: bool = True
+        for section in sections:
+            if len(current_chunk) + len(section) + 2 <= 4096:
+                current_chunk += section + "\n\n"
+            else:
+                current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
+                _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
+                current_chunk = ""
+        # Handle the last chunk.
+        if current_chunk:
+            current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
+            _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
+    else:
+        _ = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
+
+    identifier = f"{message.chat.id}/{message.message_id}/r{int(time.time())}"
+    ts = str(datetime.now())
+    metadata = {
+        "username": llm.model_name,
+        "isAnswer": True,
+        "created": ts,
+        "lastUpdated": ts,
+        "label": "chat",
+    }
+    add_to_vector_memory(
+        namespace,
+        identifier,
+        answer,
+        metadata,
     )
-    processed_message = await tlg_msg_scraper.preprocessing(reply_msg, False)
-    processed_message.isAnswer = True
-    # Store the response in an SQLite database
-    storage = SQLite3_Storage(f"{tmp_directory}/storage.db", overwrite=False)
-    storage.set(processed_message.identifier, processed_message.to_dict())
-    # Store the knowledge in the knowledge base
-    knowledge_handler = KnowledgeHandler(
-        tmp_directory=tmp_directory,
-        vdb=chat_vdb,
-        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
-        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
-    )
-    metadata = get_metadata(processed_message)
-    knowledge_handler.add(namespace=namespace, identifier=processed_message.identifier,
-                          knowledge=str(processed_message), metadata=metadata)
 
 
 async def summary_handler(update: Update, context: CallbackContext) -> None:
-    if "edited_message" in context.user_data:
+    if context.user_data and "edited_message" in context.user_data:
         message = getattr(update, "edited_message", None)
     else:
         message = getattr(update, "message", None)
+    if message is None:
+        raise ValueError("Message is None.")
     await message.reply_text("=== PROCESSING... ===")
-    namespace = f'g{message.chat.id}' if message.chat.id < 0 else str(message.chat.id)
-    tmp_directory = f'/file/{namespace}'
-    vector_collection = chat_vdb.get_or_create_collection(
-        name=namespace, metadata={
-            "hnsw:space": "cosine"
-        }
+    namespace = f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
+    # tmp_directory = f"/file/{namespace}"
+    summarizer = local.Text_to_Text(
+        connection_string=config.CONNECTION_STRING, **config.summarizer_t2t_config
     )
-    # Instantiate the RAG model
-    # Instantiate the RAG model
-    # rag = BaseRAG(
-    #     vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10
-    # )
+    chunker = FixedGroupChunker(config={"K": 1})
+    vm = ChromaMemory(
+        vdb=main_vdb,
+        encoder=encoder,
+        chunker=chunker,
+        namespace=namespace,
+        overwrite=False,
+    )
     rag = OneRAG(
-        vector_collection=vector_collection, embedding_model=EMBEDDING_MODEL, gpt_model=GPT_MODEL, top_n=10, initial_instruction=os.environ["SUMMARY_PROMPT"]
+        vector_collection=vm,
+        chat_cache=chat_memory[namespace],
+        encoder=encoder,
+        llm=summarizer,
+        top_n=30,
     )
     query_text: str = message.text.strip()
     query_text = query_text.replace("/summary ", "")
-    
-    if query_text != "":
-        query_text = f"Topic/Keyword: {query_text}"
-    else:
+
+    if query_text:
         query_text = "Topic/Keyword: General Summary"
-    
-    if "media_markdown" in context.user_data:
-        query_text += f"\n\nMedia: {context.user_data['media_markdown']}"
-    
-    answer = rag(query_text)
-    answer = escape_markdown_v2(answer)
-    reply_msg = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
-    tlg_msg_scraper = TlgMsgScraper(
-        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
-        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW,
-        vision_model=VISION_MODEL, audio_model=AUDIO_MODEL, tmp_directory=tmp_directory
+    else:
+        query_text = f"Topic/Keyword: {query_text}"
+
+    # if "media_markdown" in context.user_data:
+        # query_text += f"\n\nMedia: {context.user_data['media_markdown']}"
+
+    answer = await rag.invoke(query=query_text, user_identifier=namespace)
+    answer = escape_markdown(answer)
+    if len(answer) >= 4096:
+        sections = re.split(r"\n{2,}", answer)
+        current_chunk = ""
+        is_close: bool = True
+        for section in sections:
+            if len(current_chunk) + len(section) + 2 <= 4096:
+                current_chunk += section + "\n\n"
+            else:
+                current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
+                _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
+                current_chunk = ""
+        # Handle the last chunk.
+        if current_chunk:
+            current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
+            _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
+    else:
+        _ = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
+        
+    identifier = f"{message.chat.id}/{message.message_id}/r{int(time.time())}"
+    ts = str(datetime.now())
+    metadata = {
+        "username": llm.model_name,
+        "isAnswer": True,
+        "created": ts,
+        "lastUpdated": ts,
+        "label": "chat",
+    }
+    add_to_vector_memory(
+        namespace,
+        identifier,
+        answer,
+        metadata,
     )
-    processed_message = await tlg_msg_scraper.preprocessing(reply_msg, False)
-    processed_message.isAnswer = True
-    # Store the response in an SQLite database
-    storage = SQLite3_Storage(f"{tmp_directory}/storage.db", overwrite=False)
-    storage.set(processed_message.identifier, processed_message.to_dict())
-    # Store the knowledge in the knowledge base
-    knowledge_handler = KnowledgeHandler(
-        tmp_directory=tmp_directory,
-        vdb=chat_vdb,
-        embedding_model=EMBEDDING_MODEL, embedding_chunk_size=CHUNK_SIZE, stride_rate=0.75,
-        gpt_model=GPT_MODEL, context_window=CONTEXT_WINDOW
-    )
-    metadata = get_metadata(processed_message)
-    knowledge_handler.add(namespace=namespace, identifier=processed_message.identifier,
-                          knowledge=str(processed_message), metadata=metadata)
-    
+
 
 # async def export_handler(update: Update, context: CallbackContext) -> None:
 #     """
