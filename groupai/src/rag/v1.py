@@ -3,11 +3,9 @@ import logging
 
 # import tiktoken
 import numpy as np  # type: ignore
-from llm_agent_toolkit.encoder.local import OllamaEncoder
-from llm_agent_toolkit._memory import VectorMemory, ShortTermMemory  # type: ignore
-from llm_agent_toolkit._core import Core  # type: ignore
+from llm_agent_toolkit._memory import VectorMemory, ShortTermMemory
+from llm_agent_toolkit._core import Core
 from llm_agent_toolkit._encoder import Encoder
-from ollama import chat  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +23,7 @@ class OneRAG:
     def __init__(
         self,
         vector_collection: VectorMemory,
-        chat_cache: dict[str, ShortTermMemory],
+        chat_cache: ShortTermMemory,
         encoder: Encoder,
         llm: Core,
         top_n: int = 20,
@@ -82,9 +80,8 @@ class OneRAG:
     ) -> list[tuple[str, str, str, bool]]:
         """Retrieve relevant content."""
         # Dynamic threshold
-
         query_response: dict = self.vc.query(
-            query_string=query, advance_filter={"label": label}
+            query_string=query, advance_filter={"label": label},
         )
         result: dict = query_response["result"]
         ids = result["ids"]
@@ -101,7 +98,7 @@ class OneRAG:
         x = 0
         for identifier, doc, dist, meta in zip(ids, docs, dists, metas):
             x += dist
-            d = (identifier, doc, meta["lastUpdated"], False)
+            d = (identifier, f"**{label}**:{doc}", meta["lastUpdated"], meta["isAnswer"])
             if min_threshold <= dist <= max_threshold:
                 # Whether to polish the doc with metadata
                 relevant_docs.append(d)
@@ -110,18 +107,20 @@ class OneRAG:
         if len(relevant_docs) == 0:
             return relevant_docs
         relevant_docs.sort(key=lambda x: x[2])
-        return relevant_docs
+        return relevant_docs[:self.top_n]
 
     def retrieve(self, query: str, **kwargs) -> list[tuple[bool, str]]:
         """Retrieving..."""
         relevant_file_content: list[tuple[str, str, str, bool]] = (
             self.retrieve_relevant_content(query=query, label="file", **kwargs)
         )
+        logger.info(f"Relevant File: %d", len(relevant_file_content))
         relevant_chat_history: list[tuple[str, str, str, bool]] = (
             self.retrieve_relevant_content(query=query, label="chat", **kwargs)
         )
-        context = []
-        for chat_hx in relevant_chat_history:
+        logger.info("Relevant Chat: %d", len(relevant_chat_history))
+        context: list[tuple[str, str, str, bool]] = []
+        for chat_hx in relevant_chat_history[:-1]:
             context.append(chat_hx)
         for file_data in relevant_file_content:
             context.append(file_data)
@@ -142,8 +141,8 @@ class OneRAG:
         """Call the LLM."""
         generated_responses = self.llm.run(query=query, context=messages)
         result_string = ""
-        for idx, response in enumerate(generated_responses, start=1):
-            result_string += f"[{idx}]\t{response['content']}\n"
+        for response in generated_responses:
+            result_string += f"{response['content']}\n"
         return result_string
 
     def __call__(self, query: str, user_identifier: str, **kwargs):
@@ -157,19 +156,35 @@ class OneRAG:
 
         context = self._truncate(relevant_context, max_context_tokens)
         messages: list = self.augment(context)
-        recent_context: list[dict] = (
-            self.chat_cache[user_identifier]
-            if user_identifier in self.chat_cache
-            else []
-        )
+        recent_context: list[dict] = self.chat_cache.last_n(n=self.top_n)
         if recent_context:
             messages.extend(recent_context)
         response = self.generate(query, messages)
 
-        if user_identifier not in self.chat_cache:
-            self.chat_cache[user_identifier] = ShortTermMemory(max_entry=self.top_n + 5)
-        self.chat_cache[user_identifier].push({"role": "user", "content": query})
-        self.chat_cache[user_identifier].push(
-            {"role": "assistant", "content": response}
-        )
+        self.chat_cache.push({"role": "user", "content": query})
+        self.chat_cache.push({"role": "assistant", "content": response})
         return response
+
+    async def invoke(self, query: str, user_identifier: str, **kwargs):
+        max_context_tokens = (
+            CONTEXT_WINDOW
+            - self._count_tokens(query)
+            - CONTEXT_BUFFER
+            - RESPONSE_WINDOW
+        )  # This is not accurate!
+        relevant_context: list[tuple[bool, str]] = self.retrieve(query)
+
+        context = self._truncate(relevant_context, max_context_tokens)
+        messages: list = self.augment(context)
+        recent_context: list[dict] = self.chat_cache.last_n(n=self.top_n)
+        if recent_context:
+            messages.extend(recent_context)
+        # response = self.generate(query, messages)
+        generated_responses = await self.llm.run_async(query=query, context=messages)
+        result_string = ""
+        for response in generated_responses:
+            result_string += f"{response['content']}\n"
+
+        self.chat_cache.push({"role": "user", "content": query})
+        self.chat_cache.push({"role": "assistant", "content": result_string})
+        return result_string
