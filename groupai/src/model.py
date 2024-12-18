@@ -26,7 +26,7 @@ class Media:
 
     @property
     def json(self):
-        return dumps(self.__dict__, ensure_ascii=False).encode('utf8')
+        return dumps(self.__dict__, ensure_ascii=False).encode("utf8")
 
 
 @dataclass
@@ -61,7 +61,7 @@ class CompactMessage:
         if self.media.isMedia:
             content += f"\n\n{str(self.media)}"
         return f"{content}\n<metadata>{metadata}</metadata>"
-    
+
     def to_dict(self):
         return self.__dict__
 
@@ -71,6 +71,7 @@ class CompactMessage:
 
     @property
     def json(self):
-        return dumps(self.__dict__, ensure_ascii=False).encode('utf8')
+        return dumps(self.__dict__, ensure_ascii=False).encode("utf8")
+
 
 # END
