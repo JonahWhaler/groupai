@@ -1,4 +1,4 @@
-version: "3.8"
+version: "3.9"
 
 services:
     groupai:
@@ -9,11 +9,22 @@ services:
         env_file:
             - ./config.env
         volumes:
-            - "./storage/data:/file:rw"
-            - "./storage/logs:/logs:rw"
-            - "./storage/vect:/vect:rw"
-        deploy:
-            resources:
-                limits:
-                    cpus: "8"
-                    memory: 8192M
+            - type: bind
+              source: ./storage/data
+              target: /file
+            - type: bind
+              source: ./storage/logs
+              target: /logs
+            - type: bind
+              source: ./storage/vect
+              target: /vect
+            - type: bind
+              source: ./files
+              target: /files
+        mem_limit: 8192M
+        cpus: 8.0
+        extra_hosts:
+          - "host.docker.internal:192.168.0.55"
+
+# Add this line to connect from docker to localhost:11434
+# sudo ufw allow from 172.17.0.0/16 to any port 11434 proto tcp
