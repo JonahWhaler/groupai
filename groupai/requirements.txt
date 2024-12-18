@@ -5,4 +5,4 @@ charade==1.0.3
 tiktoken==0.8.0
 duckduckgo_search==6.3.3
 beautifulsoup4==4.12.2
-llm-agent-toolkit==0.0.12
+llm-agent-toolkit==0.0.18.1
