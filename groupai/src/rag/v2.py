@@ -1,16 +1,19 @@
+import json
 import logging
 
 import numpy as np  # type: ignore
-from llm_agent_toolkit._util import MessageBlock
+from llm_agent_toolkit._util import MessageBlock, ResponseMode
 from llm_agent_toolkit._memory import VectorMemory, ShortTermMemory
 from llm_agent_toolkit._core import Core
+
+from llms import CheckerResponse
 
 logger = logging.getLogger(__name__)
 
 
-class OneRAG:
+class GroundRAG:
     """
-    OneRAG
+    GroundRAG
     =======
 
     A Retrieval-Augmented-Generation (RAG) system integrating hybrid memory sources
@@ -48,7 +51,7 @@ class OneRAG:
     ----------
 
     * Read-Only Attributes: The `VectorMemory` and `ShortTermMemory` should not be modified.
-    * OneRAG is the consumer of the Read-Only attributes.
+    * `GroundRAG` is the consumer of the Read-Only attributes.
     """
 
     def __init__(
@@ -56,11 +59,13 @@ class OneRAG:
         vector_collection: VectorMemory,
         chat_cache: ShortTermMemory,
         llm: Core,
+        checker: Core,
         top_n: int = 20,
     ):
         self.vc = vector_collection
         self.chat_cache = chat_cache
         self.llm = llm
+        self.checker = checker
         self.top_n = top_n
 
     def _estimate_token_count(self, text: str) -> int:
@@ -130,6 +135,7 @@ class OneRAG:
         )
 
         result: dict = query_response["result"]
+
         ids = result["ids"]
         docs = result["documents"]
         metas = result["metadatas"]
@@ -250,15 +256,62 @@ class OneRAG:
         context = self._truncate(context, max_output_tokens)
         return context
 
-    async def invoke(self, query: str, **kwargs):
+    async def is_grounded(
+        self, prompt: str, result: str, context: list[MessageBlock | dict]
+    ) -> bool:
+        MAX_RETRY = 5
+        retry = 0
+        challenge: str = f"Query={prompt}\nResponse={result}"
+        context_string = ""
+        for ctx in context:
+            context_string += f"{ctx['content']}\n"
+
+        while retry < MAX_RETRY:
+            try:
+                responses = await self.checker.run_async(
+                    query=challenge,
+                    context=[MessageBlock(role="user", content=context_string)],
+                    mode=ResponseMode.SO,
+                    format=CheckerResponse,
+                )
+
+                response = responses[0]
+                logger.info("is_grounded: %s", response["content"])
+                try:
+                    obj = json.loads(response["content"])
+                    grounded = obj.get("grounded", False)
+                    if not isinstance(grounded, bool):
+                        logger.warning("Reason: %s", obj["reason"])
+                        return False
+                    return grounded
+                except json.JSONDecodeError as jde:
+                    logger.error("JSONDecodeError: %s", jde)
+                return False
+            except ValueError as ve:
+                if "max_output_tokens <= 0" in str(ve):
+                    ori_len = len(context_string)
+                    x_len = int(ori_len * 0.8)  # Reduce 20%
+                    logger.info("[%d] context_string: %d -> %d", retry, ori_len, x_len)
+                    context_string = context_string[:x_len]
+                    retry += 1
+                else:
+                    logger.error("ValueError: %s", ve)
+                    raise
+        return False
+
+    async def invoke(self, query: str, **kwargs) -> str:
         """Run this method to execute the RAG pipeline."""
         context_window = self._estimate_context_window(query)
-        messages: list[MessageBlock | dict] | None = None
-        if context_window > 0:
-            # Retrieval Phase
-            relevant_context, recent_context = self.retrieve(query)
-            # Augmentation Phase
-            messages = self.augment(relevant_context, recent_context, context_window)
+
+        if context_window <= 0:
+            raise ValueError("Context window insufficient.")
+
+        # Retrieval Phase
+        relevant_context, recent_context = self.retrieve(query)
+        # Augmentation Phase
+        messages: list[MessageBlock | dict] = self.augment(
+            relevant_context, recent_context, context_window
+        )
 
         # Generation Phase
         generated_responses = await self.llm.run_async(query=query, context=messages)
@@ -267,4 +320,11 @@ class OneRAG:
         for response in generated_responses:
             result_string += f"{response['content']}\n"
 
-        return result_string
+        flag = await self.is_grounded(
+            prompt=query, result=result_string, context=messages
+        )
+
+        logger.info("%s: %s", flag, result_string)
+        if flag:
+            return result_string
+        return "Not Available"

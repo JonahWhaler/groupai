@@ -9,7 +9,9 @@ import telegram
 from telegram.ext import CallbackContext
 
 from model import CompactMessage, Media  # type: ignore
-from llm_agent_toolkit import ImageGenerator, Transcriber, loader
+from llm_agent_toolkit import loader
+from llm_agent_toolkit.transcriber import Transcriber
+from llm_agent_toolkit._core import ImageInterpreter
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +22,7 @@ class TlgMsgScraper:
     def __init__(
         self,
         tmp_directory: str,
-        image_interpreter: ImageGenerator,
+        image_interpreter: ImageInterpreter,
         transcriber: Transcriber,
         **kwargs,
     ):

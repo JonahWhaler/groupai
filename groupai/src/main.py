@@ -46,7 +46,8 @@ def run_bot(bot: Application) -> None:
         CommandHandler("ask", handlers.ask_handler, filters=allowed_list), group=1
     )
     bot.add_handler(
-        CommandHandler("summary", handlers.summary_handler, filters=allowed_list), group=1
+        CommandHandler("summary", handlers.summary_handler, filters=allowed_list),
+        group=1,
     )
     bot.add_handler(
         MessageHandler(filters.TEXT & allowed_list, handlers.message_handler), group=1

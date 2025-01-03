@@ -1,6 +1,4 @@
 import logging
-from typing import Optional, List
-from telegram import Message
 import chromadb
 
 logger = logging.getLogger(__name__)
@@ -18,7 +16,9 @@ class ChromaDBFactory:
     instance: chromadb.ClientAPI | None = None
 
     @classmethod
-    def get_instance(cls, persist: bool | None, persist_directory: str | None) -> chromadb.ClientAPI:
+    def get_instance(
+        cls, persist: bool | None, persist_directory: str | None
+    ) -> chromadb.ClientAPI:
         if cls.instance:
             return cls.instance
         if persist and persist_directory:

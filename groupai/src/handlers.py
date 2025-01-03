@@ -1,9 +1,11 @@
 import re
 import logging
 import os
-from typing import Optional
+import asyncio
+from typing import Any, Optional
 import time
 from datetime import datetime
+import copy
 
 import telegram
 from telegram import Update
@@ -12,49 +14,68 @@ from telegram.constants import ParseMode
 
 import chromadb
 
-from llm_agent_toolkit.core import local, open_ai
-from llm_agent_toolkit.encoder.remote import OpenAIEncoder
-from llm_agent_toolkit.encoder.local import OllamaEncoder
+from llm_agent_toolkit import Encoder
 from llm_agent_toolkit.chunkers import SemanticChunker, FixedGroupChunker
 from llm_agent_toolkit._memory import ShortTermMemory
 from llm_agent_toolkit.memory import ChromaMemory
-from llm_agent_toolkit import ChatCompletionConfig, ImageGenerator, Transcriber, TranscriptionConfig, Core
-from llm_agent_toolkit.transcriber.open_ai import OpenAITranscriber
 
-import config
 from model import CompactMessage
 
 from rag.v1 import OneRAG  # type: ignore
+from rag.v2 import GroundRAG
 from tlg_msg_scrapper import TlgMsgScraper
 from myfunction import ChromaDBFactory
+import llms
 
 logger = logging.getLogger(__name__)
 
 # Define Global Variables
-local.OllamaCore.load_csv("/files/ollama.csv")
-encoder = OllamaEncoder(
-    connection_string=config.CONNECTION_STRING, model_name=config.emb_model_name
+main_vdb: chromadb.ClientAPI = ChromaDBFactory.get_instance(
+    persist=True, persist_directory="/vect/main"
 )
-llm: Core = local.Text_to_Text(connection_string=config.CONNECTION_STRING, **config.main_t2t_config)
-ii: ImageGenerator = local.Image_to_Text(connection_string=config.CONNECTION_STRING, **config.main_i2t_config)
-transcriber: Transcriber = OpenAITranscriber(TranscriptionConfig(name=config.a2t_model_name))
-main_vdb: chromadb.ClientAPI = ChromaDBFactory.get_instance(persist=True, persist_directory="/vect/main")
 chat_memory: dict[str, ShortTermMemory] = {}
 
+user_locks: dict[str, asyncio.Lock] = {}
 
-def get_metadata(message: CompactMessage) -> dict:
+
+def get_user_lock(identifier: str) -> asyncio.Lock:
+    """
+    Get a lock for a specific user based on their identifier.
+
+    Args:
+        identifier (str): The identifier of the user.
+
+    Returns:
+        asyncio.Lock: The lock associated with the user.
+    """
+    global user_locks
+    if identifier not in user_locks:
+        user_locks[identifier] = asyncio.Lock()
+    return user_locks[identifier]
+
+
+def get_metadata(message: CompactMessage) -> dict[str, Any]:
+    """
+    Generate metadata for a CompactMessage.
+
+    Args:
+        message (CompactMessage): The CompactMessage to generate metadata for.
+
+    Returns:
+        dict[str, Any]: A dictionary containing metadata for the CompactMessage.
+    """
     metadata = {}
-    metadata["created"] = message.created
-    metadata["lastUpdated"] = message.lastUpdated
+    metadata["created"] = message.created  # datetime string
+    metadata["lastUpdated"] = message.lastUpdated  # datetime string
     metadata["username"] = message.username
-    metadata["isAnswer"] = message.isAnswer
-    metadata["isForwarded"] = message.isForwarded
+    metadata["isAnswer"] = message.isAnswer  # bool
+    metadata["isForwarded"] = message.isForwarded  # bool
     if message.isForwarded:
         metadata["author"] = message.author
-        metadata["isBot"] = message.isBot
-    metadata["edited"] = message.edited
-    metadata["deleted"] = message.deleted
-    metadata["isMedia"] = message.media.isMedia
+        metadata["isBot"] = message.isBot  # bool
+    metadata["edited"] = message.edited  # bool
+    metadata["deleted"] = message.deleted  # bool
+    metadata["isMedia"] = message.media.isMedia  # bool
     if message.media.isMedia:
         metadata["mime_type"] = message.media.mime_type
     metadata["label"] = "file" if message.media.isMedia else "chat"
@@ -63,11 +84,16 @@ def get_metadata(message: CompactMessage) -> dict:
 
 async def middleware_function(update: Update, context: CallbackContext) -> None:
     """
-    Intercept, process, and store content of incoming Telegram messages, including media, in databases.
+    Intercept, process, and store content of incoming Telegram messages, including file upload.
 
-    This asynchronous middleware function handles both new and edited messages from Telegram.
-    It parses the message into a CompactMessage format, processes any media content,
-    generates text embeddings, and stores the information in both SQLite and vector databases.
+    This asynchronous middleware function handles both new and edited (TODO) messages from Telegram.
+
+    Steps:
+    0. Acquires a lock for the user based on their identifier
+    1. Parses the message into a CompactMessage format
+    2. Converts file upload to markdown format and generate file summary
+    3. Stores chat and file (raw text + file summary) in `VectorMemory`
+    4. Stores chat in `ShortTermMemory`
 
     Args:
         update (Update): The incoming update object from Telegram.
@@ -77,94 +103,108 @@ async def middleware_function(update: Update, context: CallbackContext) -> None:
         None
 
     Raises:
-        No exceptions are explicitly raised, but errors are logged.
-
+        ValueError: If the message is None.
     """
     global chat_memory, main_vdb
-    logger.info("\nMiddleware Function => Update: %s", update)
+    logger.info("\n>> Middleware Function => %s", update)
     # Extract the message or edited message from the update
     message: Optional[telegram.Message] = getattr(update, "message", None)
-    edited_message: Optional[telegram.Message] = getattr(update, "edited_message", None)
-    if not message and not edited_message:
-        logger.error("\nException: [Message Body Not Found]=> Update: %s", update)
-        return None
+    # edited_message: Optional[telegram.Message] = getattr(update, "edited_message", None)
 
-    if edited_message and context.user_data:
-        context.user_data["edited_message"] = True
-        namespace = (
-            f"g{edited_message.chat.id}"
-            if edited_message.chat.id < 0
-            else str(edited_message.chat.id)
-        )
-    elif message:
-        namespace = (
-            f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
-        )
-    else:
-        raise ValueError("Message is None.")
+    is_edit: bool = False
+    if message is None:
+        message = getattr(update, "edited_message", None)
+        if message is None:
+            raise ValueError("Message is None.")
+        is_edit = True
 
-    tmp_directory = f"/file/{namespace}"
-    tlg_msg_scraper = TlgMsgScraper(
-        tmp_directory=tmp_directory, image_interpreter=ii, transcriber=transcriber
-    )
-    if edited_message:
-        processed_message = await tlg_msg_scraper.preprocessing(edited_message, True)
-    else:
-        processed_message = await tlg_msg_scraper.preprocessing(message, False)
+    if context.user_data:
+        context.user_data["edited_message"] = is_edit
 
-    if processed_message.media.isMedia:
-        media_file = await context.bot.get_file(processed_message.media.fileid)
-        # Issue: More than one user upload file with the same filename
-        tmp_path = f"{tmp_directory}/{processed_message.media.filename}"
-        await media_file.download_to_drive(tmp_path)
-        processed_message.media.markdown = tlg_msg_scraper.to_markdown(
-            processed_message, input_path=tmp_path
+    NAMESPACE = f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
+    TMP_DIRECTORY = f"/file/{NAMESPACE}"
+
+    ulock = get_user_lock(NAMESPACE)
+    async with ulock:
+        logger.info("Acquired lock for user: %s", NAMESPACE)
+
+        tlg_msg_scraper = TlgMsgScraper(
+            tmp_directory=TMP_DIRECTORY,
+            image_interpreter=llms.image_interpreter_llm,
+            transcriber=llms.transcriber_llm,
         )
-        os.remove(tmp_path)
-        if context.user_data:
-            context.user_data["media_markdown"] = processed_message.media.markdown
+        processed_message: CompactMessage = await tlg_msg_scraper.preprocessing(
+            message=message, edited=is_edit
+        )
+
+        if processed_message.media.isMedia:
+            media_file = await context.bot.get_file(processed_message.media.fileid)
+            # Issue: More than one user upload file with the same filename
+            TMP_PATH = f"{TMP_DIRECTORY}/{processed_message.media.filename}"
+            await media_file.download_to_drive(TMP_PATH)
+            processed_message.media.markdown = tlg_msg_scraper.to_markdown(
+                processed_message, input_path=TMP_PATH
+            )
+            os.remove(TMP_PATH)
+            if context.user_data:
+                context.user_data["media_markdown"] = processed_message.media.markdown
+
+        content = str(processed_message)
+        metadata = get_metadata(processed_message)
+
+        if is_edit:
+            pass  # vm.remove(processed_message.identifier)
+
+        if processed_message.media.isMedia:
+            logger.info("Add file to vector memory...")
+            add_file_to_vector_memory(
+                namespace=NAMESPACE,
+                identifier=processed_message.identifier,
+                data=processed_message.media.markdown,
+                filename=processed_message.media.filename,
+                metadata=metadata,
+                encoder=llms.encoder,
+            )
+            # Create file summary
+            file_summary = await llms.summarizer_llm.run_async(
+                query="Give me a summary of this file.",
+                context=[
+                    {
+                        "role": "user",
+                        "content": content[
+                            : llms.summarizer_llm.context_length
+                            - llms.summarizer_llm.max_output_tokens
+                        ],
+                    }
+                ],
+            )
+            metadata["label"] = "summary"
+            add_file_to_vector_memory(
+                namespace=NAMESPACE,
+                identifier=f"{processed_message.identifier}|S",
+                data=file_summary,
+                filename=processed_message.media.filename,
+                metadata=metadata,
+                encoder=llms.encoder,
+            )
+
+            file_summary = escape_markdown(file_summary)
+            await message.reply_text(file_summary, parse_mode=ParseMode.MARKDOWN_V2)
         else:
-            logger.warning("context.user_data is None.")
+            logger.info("Add text to vector memory...")
+            add_text_to_vector_memory(
+                namespace=NAMESPACE,
+                identifier=processed_message.identifier,
+                data=content,
+                metadata=metadata,
+                encoder=llms.encoder,
+            )
 
-    metadata = get_metadata(processed_message)
-    # logger.info(f"Metadat: {metadata}")
-    content = str(processed_message)
-    logger.info("Information: %s", content)
-    K = max(len(content) // encoder.ctx_length * 2, 1)
-    if processed_message.media.isMedia and K > 1:
-        chunker = SemanticChunker(
-            encoder=encoder,
-            config={
-                "K": K,
-                "MAX_ITERATION": 50,
-                "update_rate": 0.3,
-                "min_coverage": 0.9,
-            },
-        )
-    else:
-        chunker = FixedGroupChunker(
-            config={
-                "K": max(K, 1)
-            }
-        )
-    vm = ChromaMemory(
-        vdb=main_vdb,
-        encoder=encoder,
-        chunker=chunker,
-        namespace=namespace,
-        overwrite=False,
-    )
-    # if "edited_message" in context.user_data:
-    #     vm.update
-    vm.add(
-        document_string=content,
-        identifier=processed_message.identifier,
-        metadata=metadata,
-    )
-    if namespace not in chat_memory:
-        logger.info("Register %s to chat_memory.", namespace)
-        chat_memory[namespace] = ShortTermMemory(max_entry=20)
-    chat_memory[namespace].push({"role": "user", "content": content})
+        logger.info("Add chat to chat_memory...")
+        if NAMESPACE not in chat_memory:
+            logger.info("Register %s to chat_memory.", NAMESPACE)
+            chat_memory[NAMESPACE] = ShortTermMemory(max_entry=20)
+        chat_memory[NAMESPACE].push({"role": "user", "content": content})
 
 
 async def error_handler(update: object, context: CallbackContext):
@@ -193,7 +233,6 @@ def escape_markdown(text):
     """
     Escape special characters for Telegram's HTMLV2.
     """
-    import re
     # Characters that need to be escaped
     special_chars = [
         "_",
@@ -232,17 +271,38 @@ def escape_html(text):
     _text = text[:]
     special_characters = [">", "<", "&", "="]
     for c in special_characters:
-        _text = _text.replace(c, f"\{c}")
+        _text = _text.replace(c, r"\{c}")
     _text = _text.replace("```python", "```")
     return _text
 
-def add_to_vector_memory(namespace: str, identifier: str, data: str, metadata: dict):
-    global chat_memory, main_vdb
-    if len(data) >= encoder.ctx_length:
+
+def compute_k(text_len: int, ctx_length: int) -> int:
+    return max(text_len // ctx_length * 2, 1)
+
+
+def add_text_to_vector_memory(
+    namespace: str, identifier: str, data: str, metadata: dict, encoder: Encoder
+):
+    """
+    Add text to vector memory.
+
+    Args:
+        namespace (str): Namespace.
+        identifier (str): Identifier.
+        data (str): Data.
+        metadata (dict): Metadata.
+        encoder (Encoder): Encoder.
+
+    Returns:
+        None
+    """
+    global main_vdb
+    data_len = len(data)
+    if data_len >= encoder.ctx_length:
         chunker = SemanticChunker(
             encoder=encoder,
             config={
-                "K": len(data) // encoder.ctx_length,
+                "K": compute_k(data_len, encoder.ctx_length),
                 "MAX_ITERATION": 20,
                 "update_rate": 0.3,
                 "min_coverage": 0.9,
@@ -252,18 +312,69 @@ def add_to_vector_memory(namespace: str, identifier: str, data: str, metadata: d
         chunker = FixedGroupChunker(config={"K": 1})
 
     # Store the knowledge in the knowledge base
-    vm = ChromaMemory(
+    ChromaMemory(
         vdb=main_vdb,
         encoder=encoder,
         chunker=chunker,
         namespace=namespace,
         overwrite=False,
-    )
-    vm.add(
+    ).add(
         document_string=data,
         identifier=identifier,
         metadata=metadata,
     )
+
+
+def add_file_to_vector_memory(
+    namespace: str,
+    identifier: str,
+    data: str,
+    filename: str,
+    metadata: dict,
+    encoder: Encoder,
+) -> None:
+    """
+    Add file content to vector memory.
+
+    Args:
+        namespace (str): Namespace.
+        identifier (str): Identifier.
+        data (str): Data.
+        filename (str): Filename.
+        metadata (dict): Metadata.
+        encoder (Encoder): Encoder.
+
+    Returns:
+        None
+    """
+    global main_vdb
+    chunker = SemanticChunker(
+        encoder=encoder,
+        config={
+            "K": compute_k(len(data), encoder.ctx_length),
+            "MAX_ITERATION": 50,
+            "update_rate": 0.3,
+            "min_coverage": 0.9,
+        },
+    )
+    chunks = chunker.split(data)
+
+    vm = ChromaMemory(
+        vdb=main_vdb,
+        encoder=encoder,
+        chunker=FixedGroupChunker(config={"K": 1}),
+        namespace=namespace,
+        overwrite=False,
+    )
+
+    for i, chunk in enumerate(chunks, start=1):
+        _metadata = copy.deepcopy(metadata)
+        _metadata["page"] = i
+        vm.add(
+            document_string=f"{filename}:{chunk}",
+            identifier=f"{identifier}|{i}",
+            metadata=_metadata,
+        )
 
 
 def handle_triple_ticks(text: str, closed: bool):
@@ -275,9 +386,11 @@ def handle_triple_ticks(text: str, closed: bool):
     if not close:
         t += TRIPLE_TICKS
     return t, close
-    
+
+
 async def ask_handler(update: Update, context: CallbackContext) -> None:
-    global chat_memory, main_vdb, encoder, llm
+    global chat_memory, main_vdb, llm
+
     if context.user_data and "edited_message" in context.user_data:
         message = getattr(update, "edited_message", None)
     else:
@@ -285,22 +398,28 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
 
     if message is None:
         raise ValueError("Message is None.")
+
+    NAMESPACE = f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
+
+    ulock = get_user_lock(NAMESPACE)
+    if ulock.locked():
+        await message.reply_text("Please wait until the last operation complete.")
+        return None
+
     await message.reply_text("=== PROCESSING... ===")
-    namespace = f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
     # tmp_directory = f"/file/{namespace}"
     chunker = FixedGroupChunker(config={"K": 1})
     vm = ChromaMemory(
         vdb=main_vdb,
-        encoder=encoder,
+        encoder=llms.encoder,
         chunker=chunker,
-        namespace=namespace,
+        namespace=NAMESPACE,
         overwrite=False,
     )
     rag = OneRAG(
         vector_collection=vm,
-        chat_cache=chat_memory[namespace],
-        encoder=encoder,
-        llm=llm,
+        chat_cache=chat_memory[NAMESPACE],
+        llm=llms.rag_llm,
         top_n=10,
     )
     # Generate the response
@@ -309,76 +428,93 @@ async def ask_handler(update: Update, context: CallbackContext) -> None:
     if context.user_data and "media_markdown" in context.user_data:
         query_text += f"\n\n{context.user_data['media_markdown']}"
 
-    # answer = rag(query=query_text, user_identifier=namespace)
-    answer = await rag.invoke(query=query_text, user_identifier=namespace)
-    answer = escape_markdown(answer)
-    # answer = escape_markdown(answer)
-    # Send the response
-    logger.info("Answer: %s", answer)
+    async with ulock:
+        # answer = rag(query=query_text, user_identifier=namespace)
+        answer = await rag.invoke(query=query_text, user_identifier=NAMESPACE)
+        chat_memory[NAMESPACE].push({"role": "assistant", "content": answer})
+        # answer = escape_markdown(answer)
+        # Send the response
+        logger.info("Answer: %s", answer)
 
-    if len(answer) >= 4096:
-        sections = re.split(r"\n{2,}", answer)
-        current_chunk = ""
-        is_close: bool = True
-        for section in sections:
-            if len(current_chunk) + len(section) + 2 <= 4096:
-                current_chunk += section + "\n\n"
-            else:
+        if len(answer) >= 4096:
+            sections = re.split(r"\n{2,}", answer)
+            current_chunk = ""
+            is_close: bool = True
+            for section in sections:
+                if len(current_chunk) + len(section) + 2 <= 4096:
+                    current_chunk += section + "\n\n"
+                else:
+                    current_chunk = escape_markdown(current_chunk)
+                    current_chunk, is_close = handle_triple_ticks(
+                        current_chunk, is_close
+                    )
+                    _ = await message.reply_text(
+                        current_chunk, parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                    current_chunk = ""
+            # Handle the last chunk.
+            if current_chunk:
                 current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
-                _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
-                current_chunk = ""
-        # Handle the last chunk.
-        if current_chunk:
-            current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
-            _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
-    else:
-        _ = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
+                _ = await message.reply_text(
+                    current_chunk, parse_mode=ParseMode.MARKDOWN_V2
+                )
+        else:
+            answer = escape_markdown(answer)
+            _ = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
 
-    identifier = f"{message.chat.id}/{message.message_id}/r{int(time.time())}"
-    ts = str(datetime.now())
-    metadata = {
-        "username": llm.model_name,
-        "isAnswer": True,
-        "created": ts,
-        "lastUpdated": ts,
-        "label": "chat",
-    }
-    add_to_vector_memory(
-        namespace,
-        identifier,
-        answer,
-        metadata,
-    )
+        identifier = f"{message.chat.id}/{message.message_id}/r{int(time.time())}"
+        ts = str(datetime.now())
+        metadata = {
+            "username": llms.rag_llm.model_name,
+            "isAnswer": True,
+            "created": ts,
+            "lastUpdated": ts,
+            "label": "chat",
+        }
+        add_text_to_vector_memory(
+            NAMESPACE,
+            identifier,
+            answer,
+            metadata,
+            llms.encoder,
+        )
 
 
 async def summary_handler(update: Update, context: CallbackContext) -> None:
+    global chat_memory, main_vdb, encoder
+
     if context.user_data and "edited_message" in context.user_data:
         message = getattr(update, "edited_message", None)
     else:
         message = getattr(update, "message", None)
     if message is None:
         raise ValueError("Message is None.")
+
+    NAMESPACE = f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
+
+    ulock = get_user_lock(NAMESPACE)
+    if ulock.locked():
+        await message.reply_text("Please wait until the last operation complete.")
+        return None
+
     await message.reply_text("=== PROCESSING... ===")
-    namespace = f"g{message.chat.id}" if message.chat.id < 0 else str(message.chat.id)
     # tmp_directory = f"/file/{namespace}"
-    summarizer = local.Text_to_Text(
-        connection_string=config.CONNECTION_STRING, **config.summarizer_t2t_config
-    )
     chunker = FixedGroupChunker(config={"K": 1})
     vm = ChromaMemory(
         vdb=main_vdb,
-        encoder=encoder,
+        encoder=llms.encoder,
         chunker=chunker,
-        namespace=namespace,
+        namespace=NAMESPACE,
         overwrite=False,
     )
-    rag = OneRAG(
+    rag = GroundRAG(
         vector_collection=vm,
-        chat_cache=chat_memory[namespace],
-        encoder=encoder,
-        llm=summarizer,
+        chat_cache=chat_memory[NAMESPACE],
+        llm=llms.summarizer_llm,
+        checker=llms.checker_llm,
         top_n=30,
     )
+    logger.info("GroundRAG: %s", rag)
     query_text: str = message.text.strip()
     query_text = query_text.replace("/summary ", "")
 
@@ -388,43 +524,49 @@ async def summary_handler(update: Update, context: CallbackContext) -> None:
         query_text = f"Topic/Keyword: {query_text}"
 
     # if "media_markdown" in context.user_data:
-        # query_text += f"\n\nMedia: {context.user_data['media_markdown']}"
+    # query_text += f"\n\nMedia: {context.user_data['media_markdown']}"
 
-    answer = await rag.invoke(query=query_text, user_identifier=namespace)
-    answer = escape_markdown(answer)
-    if len(answer) >= 4096:
-        sections = re.split(r"\n{2,}", answer)
-        current_chunk = ""
-        is_close: bool = True
-        for section in sections:
-            if len(current_chunk) + len(section) + 2 <= 4096:
-                current_chunk += section + "\n\n"
-            else:
+    async with ulock:
+        answer = await rag.invoke(query=query_text, user_identifier=NAMESPACE)
+        chat_memory[NAMESPACE].push({"role": "assistant", "content": answer})
+        # answer = escape_markdown(answer)
+        if len(answer) >= 4096:
+            sections = re.split(r"\n{2,}", answer)
+            current_chunk = ""
+            is_close: bool = True
+            for section in sections:
+                if len(current_chunk) + len(section) + 2 <= 4096:
+                    current_chunk += section + "\n\n"
+                else:
+                    current_chunk = escape_markdown(current_chunk)
+                    current_chunk, is_close = handle_triple_ticks(
+                        current_chunk, is_close
+                    )
+                    _ = await message.reply_text(
+                        current_chunk, parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                    current_chunk = ""
+            # Handle the last chunk.
+            if current_chunk:
+                current_chunk = escape_markdown(current_chunk)
                 current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
-                _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
-                current_chunk = ""
-        # Handle the last chunk.
-        if current_chunk:
-            current_chunk, is_close = handle_triple_ticks(current_chunk, is_close)
-            _ = await message.reply_text(current_chunk, parse_mode=ParseMode.MARKDOWN_V2)
-    else:
-        _ = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
-        
-    identifier = f"{message.chat.id}/{message.message_id}/r{int(time.time())}"
-    ts = str(datetime.now())
-    metadata = {
-        "username": llm.model_name,
-        "isAnswer": True,
-        "created": ts,
-        "lastUpdated": ts,
-        "label": "chat",
-    }
-    add_to_vector_memory(
-        namespace,
-        identifier,
-        answer,
-        metadata,
-    )
+                _ = await message.reply_text(
+                    current_chunk, parse_mode=ParseMode.MARKDOWN_V2
+                )
+        else:
+            answer = escape_markdown(answer)
+            _ = await message.reply_text(answer, parse_mode=ParseMode.MARKDOWN_V2)
+
+        identifier = f"{message.chat.id}/{message.message_id}/r{int(time.time())}"
+        ts = str(datetime.now())
+        metadata = {
+            "username": llms.summarizer_llm.model_name,
+            "isAnswer": True,
+            "created": ts,
+            "lastUpdated": ts,
+            "label": "chat",
+        }
+        add_text_to_vector_memory(NAMESPACE, identifier, answer, metadata, llms.encoder)
 
 
 # async def export_handler(update: Update, context: CallbackContext) -> None:

@@ -1,8 +1,8 @@
-python-telegram-bot[rate-limiter]==21.1.1
+python-telegram-bot[rate-limiter]==21.9
 PyYAML==6.0
 python-dotenv==0.21.0
 charade==1.0.3
 tiktoken==0.8.0
 duckduckgo_search==6.3.3
 beautifulsoup4==4.12.2
-llm-agent-toolkit==0.0.18.1
+llm-agent-toolkit[transcriber]==0.0.24
